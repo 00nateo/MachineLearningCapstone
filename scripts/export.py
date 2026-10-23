@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -97,7 +98,10 @@ def zero_filled(con, query, time_col, values, name):
 
 
 def nyc_zones():
-    shp = gpd.read_file(f"zip://{EXT / 'geo' / 'taxi_zones.zip'}").to_crs("EPSG:4326")
+    zpath = EXT / "geo" / "taxi_zones.zip"
+    # The shapefile sits in a subfolder of the zip, which GDAL won't find on its own.
+    member = next(n for n in zipfile.ZipFile(zpath).namelist() if n.lower().endswith(".shp"))
+    shp = gpd.read_file(f"/vsizip/{zpath}/{member}").to_crs("EPSG:4326")
     # LocationID has had duplicate values in some releases; OBJECTID is the fallback key.
     key = next((c for c in ("LocationID", "OBJECTID")
                 if c in shp and shp[c].is_unique and set(shp[c]) == set(range(1, 264))), None)
