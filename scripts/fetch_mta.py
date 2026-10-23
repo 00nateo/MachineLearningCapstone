@@ -21,7 +21,7 @@ import tempfile
 import time
 from datetime import date, timedelta
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from http.client import HTTPException
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -53,7 +53,7 @@ def get(url, params, tries=5, timeout=600):
         try:
             with urlopen(Request(url, headers=headers), timeout=timeout) as r:
                 return r.read()
-        except (HTTPError, URLError, TimeoutError) as e:
+        except (OSError, HTTPException) as e:  # incl. timeouts, resets, IncompleteRead
             print(f"  retry {attempt}/{tries}: {e}", file=sys.stderr, flush=True)
             time.sleep(15 * attempt)
     raise RuntimeError(f"giving up on {url}")

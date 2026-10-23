@@ -12,7 +12,8 @@ import time
 import zipfile
 from datetime import date
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from http.client import HTTPException
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import duckdb
@@ -45,7 +46,7 @@ def get(url, tries=5, timeout=600):
             if e.code == 404:
                 return None
             err = e
-        except (URLError, TimeoutError) as e:
+        except (OSError, HTTPException) as e:  # incl. timeouts, resets, IncompleteRead
             err = e
         print(f"  retry {attempt}/{tries}: {err}", file=sys.stderr, flush=True)
         time.sleep(15 * attempt)
