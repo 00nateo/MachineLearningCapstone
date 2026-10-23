@@ -127,7 +127,7 @@ for year in $(seq "$START_YEAR" "$END_YEAR"); do
   for month in $(seq -w 1 12); do
     for d in $(seq -w 1 "$(days_in_month "$year" "$month")"); do
       day="$year-$month-$d"
-      [[ "$day" < "$today" ]] && echo "$dataset $day $cols"
+      if [[ "$day" < "$today" ]]; then echo "$dataset $day $cols"; fi
     done
   done
 done | xargs -P "$JOBS" -n 3 bash -c 'download_day "$0" "$1" "$2"'
