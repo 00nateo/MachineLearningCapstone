@@ -33,16 +33,18 @@ STAGE = ROOT / "data" / "export.tmp"
 AIRPORT_CITY = {"ORD": "chicago", "MDW": "chicago", "JFK": "nyc", "LGA": "nyc", "EWR": "nyc"}
 ALERT_AGENCIES = ("NYCT Subway", "NYCT Bus", "LIRR", "MNR", "BT")
 UTM = {"nyc": "EPSG:32618", "chicago": "EPSG:32616"}  # metres, for area and centroids
+ADJ_TOLERANCE_M = 20  # polygons this close count as neighbours (bridges digitising gaps)
 
 TABLES = {  # file -> (time column for the manifest, description for the dataset card)
-    "nyc_zone_hour.parquet": ("hour", "Pickups per NYC taxi zone (1-263) per local hour, zero-filled. Source of hotspot labels and demand lags."),
-    "chicago_zone_hour.parquet": ("hour", "Pickups per Chicago community area (1-77) per local hour, zero-filled."),
+    "nyc_zone_hour.parquet": ("hour", "Per NYC taxi zone (1-263) x local hour: pickups and dropoffs (zero-filled); median request-to-pickup wait, fare+tip, driver pay and trip miles of pickups. Source of hotspot labels and demand lags."),
+    "chicago_zone_hour.parquet": ("hour", "Per Chicago community area (1-77) x local hour: pickups and dropoffs (zero-filled); median fare+tip and trip miles of pickups (no wait or driver pay published)."),
     "nyc_city_hour.parquet": ("hour", "Citywide pickups per hour, pickups with no valid zone (264/265), dst_merged_hour."),
     "chicago_city_hour.parquet": ("hour", "Citywide pickups per hour, pickups with NULL community area, dst_merged_hour."),
     "nyc_drive_times.parquet": ("year", "Median trip seconds per OD zone pair x year x hour of day x weekend. Use year y-1 for year y."),
     "chicago_drive_times.parquet": ("year", "Median trip seconds per OD community-area pair x year x hour of day x weekend."),
     "zones_nyc.parquet": (None, "GeoParquet: taxi zone polygons, borough, name, area, centroid, subway station complexes."),
     "zones_chicago.parquet": (None, "GeoParquet: community area polygons, name, area, centroid, 'L' stations."),
+    "zone_adjacency.parquet": (None, "Neighbouring zone pairs per city (polygons within 20 m), both directions, with centroid distance in km."),
     "weather_asos.parquet": ("valid_utc", "ASOS observations (ORD, MDW, LGA, JFK, Central Park), routine + special METARs."),
     "nws_warnings.parquet": ("utc_issue", "NWS VTEC products from LOT (Chicago) and OKX (NYC); gtype C rows carry UGC zone codes."),
     "bts_airport_hour.parquet": ("hour", "Flights per airport x local hour: scheduled/cancelled by scheduled time, delays by actual time."),
@@ -61,6 +63,9 @@ CONVENTIONS = """\
 - 0 means an observed zero; a missing row or NULL means no data. MTA ridership starts 2020-07; zones
   without a station are absent from `mta_zone_hour` / `cta_area_day` (see the station counts in the
   zones tables). Alert and flight tables only have rows for hours with activity.
+- Zone-hour `median_*` columns describe that hour's pickups and are NULL when it had none.
+  Dropoffs are counted where and when trips ended. Like pickups, all of them are only known once
+  the hour is over, so lag them >= 1 hour.
 - Splits are by time only: train 2019-2022 excluding 2020-03..2021-06, early-stop 2023,
   calibrate 2024, test 2025+.
 
@@ -150,6 +155,20 @@ def write_zones(zones, station_counts, col, city, name):
     zones.assign(area_km2=utm.area / 1e6, centroid_lat=cent.y, centroid_lon=cent.x,
                  **{col: zones["zone"].map(station_counts).fillna(0).astype("int16")}
                  ).to_parquet(STAGE / name, compression="zstd", index=False)
+
+
+def adjacency(zones, city):
+    """Neighbouring zone pairs (polygons within ADJ_TOLERANCE_M), both directions."""
+    utm = zones[["zone", "geometry"]].to_crs(UTM[city])
+    buf = utm.assign(geometry=utm.buffer(ADJ_TOLERANCE_M))
+    pairs = gpd.sjoin(buf, buf, predicate="intersects")
+    pairs = pairs[pairs["zone_left"] != pairs["zone_right"]]
+    cent = utm.set_index("zone").centroid
+    a = cent.loc[pairs["zone_left"]].reset_index(drop=True)
+    b = cent.loc[pairs["zone_right"]].reset_index(drop=True)
+    return pd.DataFrame({"city": city, "zone": pairs["zone_left"].astype("int16").values,
+                         "neighbor": pairs["zone_right"].astype("int16").values,
+                         "centroid_km": (a.distance(b) / 1000).round(3).values})
 
 
 def mta_zone_hour(con, zones):
@@ -292,6 +311,8 @@ def main():
     nyc, chicago = nyc_zones(), chicago_zones()
     write_zones(nyc, mta_zone_hour(con, nyc), "n_subway_complexes", "nyc", "zones_nyc.parquet")
     write_zones(chicago, cta_area_day(con, chicago), "n_l_stations", "chicago", "zones_chicago.parquet")
+    pd.concat([adjacency(nyc, "nyc"), adjacency(chicago, "chicago")]).to_parquet(
+        STAGE / "zone_adjacency.parquet", compression="zstd", index=False)
     bts_airport_hour(con)
     mta_alerts_hour(con)
 
