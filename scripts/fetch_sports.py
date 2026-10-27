@@ -52,6 +52,7 @@ METRO = {  # state -> venue cities kept (in or near the two cities)
     "IL": {"Chicago", "Evanston", "Rosemont", "Bridgeview"},
 }
 STATE_ABBR = {"New York": "NY", "New Jersey": "NJ", "Illinois": "IL"}  # MLB/MLS spell states out
+CITY_STATE = {"New York City": ("New York", "NY")}  # MLS venues given with no state at all
 COLS = ["league", "event_id", "start_utc", "venue_id", "venue_name", "city", "state",
         "neutral_site", "attendance", "home", "away", "detail", "status"]
 
@@ -76,7 +77,9 @@ def day_rows(league, day):
             v = c.get("venue") or {}
             a = v.get("address") or {}
             city, state = a.get("city"), a.get("state")
-            if not state and city and ", " in city:  # MLS: "Chicago, Illinois", no state field
+            if not state and city in CITY_STATE:
+                city, state = CITY_STATE[city]
+            elif not state and city and ", " in city:  # MLS: "Chicago, Illinois", no state field
                 city, state = city.rsplit(", ", 1)
             state = STATE_ABBR.get(state, state)
             if city not in METRO.get(state, ()):

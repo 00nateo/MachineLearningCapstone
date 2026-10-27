@@ -48,6 +48,7 @@ ENTRY_POINTS = {
     "MetLife Stadium": [("Penn Station", 40.7506, -73.9935), ("Port Authority", 40.7570, -73.9903)],
     "Prudential Center": [("Penn Station", 40.7506, -73.9935)],
     "Red Bull Arena": [("33rd St PATH", 40.7489, -73.9881), ("World Trade Center PATH", 40.7126, -74.0111)],
+    "Sports Illustrated Stadium": [("33rd St PATH", 40.7489, -73.9881), ("World Trade Center PATH", 40.7126, -74.0111)],  # Red Bull Arena, renamed
     "UBS Arena": [("UBS Arena", 40.7117, -73.7259)],
     "Allstate Arena": [("O'Hare", 41.9786, -87.9048)],
     "Ryan Field": [("Howard CTA", 42.0190, -87.6729)],
