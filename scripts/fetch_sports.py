@@ -75,12 +75,15 @@ def day_rows(league, day):
         for c in e.get("competitions", []):
             v = c.get("venue") or {}
             a = v.get("address") or {}
-            state = STATE_ABBR.get(a.get("state"), a.get("state"))
-            if a.get("city") not in METRO.get(state, ()):
+            city, state = a.get("city"), a.get("state")
+            if not state and city and ", " in city:  # MLS: "Chicago, Illinois", no state field
+                city, state = city.rsplit(", ", 1)
+            state = STATE_ABBR.get(state, state)
+            if city not in METRO.get(state, ()):
                 continue
             teams = {t.get("homeAway"): (t.get("team") or {}).get("displayName") for t in c.get("competitors", [])}
             rows.append({"league": league, "event_id": e.get("id"), "start_utc": c.get("date") or e.get("date"),
-                         "venue_id": v.get("id"), "venue_name": v.get("fullName"), "city": a.get("city"),
+                         "venue_id": v.get("id"), "venue_name": v.get("fullName"), "city": city,
                          "state": state, "neutral_site": c.get("neutralSite"),
                          "attendance": c.get("attendance"), "home": teams.get("home"), "away": teams.get("away"),
                          "detail": None, "status": ((c.get("status") or {}).get("type") or {}).get("name")})
