@@ -9,9 +9,14 @@ setlist.fm is crowd-sourced: coverage favours well-known acts. Setlists carry a 
 start time (treat as an evening show), and one row per act (openers included), so count
 distinct (venue_key, date) for shows. One venue can have several setlist.fm ids (the main
 Madison Square Garden id stops in 2022), so ids are collected by name search and printed for
-review. Re-fetched in full on every run.
+review. Name searches also catch unrelated venues (e.g. "Terminal 5" at JFK airport); those are
+removed by EXCLUDE_NAMES and METRO_CITIES. Re-fetched in full on every run.
+Usage: python scripts/fetch_concerts.py [--refilter]   (--refilter: re-apply the exclusions to the
+       existing outputs without fetching)
 """
+import argparse
 import json
+import re
 import sys
 import time
 from datetime import date, datetime
@@ -70,6 +75,15 @@ VENUES = {  # venue_key -> (state, search names incl. former names)
 }
 
 
+EXCLUDE_NAMES = re.compile(r"JFK|AirTrain|Goose Island|Community Center|Urban Farm", re.I)
+METRO_CITIES = {"New York", "Brooklyn", "Queens", "The Bronx", "Bronx", "Elmont", "East Rutherford", "Newark",
+                "Chicago", "Rosemont", "Tinley Park"}
+
+
+def keep_venue(name, city):
+    return city in METRO_CITIES and not EXCLUDE_NAMES.search(name)
+
+
 def get(path, params, tries=6):
     url = f"{BASE}/{path}?{urlencode(params)}"
     headers = {"x-api-key": KEY, "Accept": "application/json", "User-Agent": "rideshare-capstone"}
@@ -100,7 +114,7 @@ def venue_ids(key, state, names):
             for v in res.get("venue", []):
                 city = v.get("city") or {}
                 if (city.get("stateCode") == state and (city.get("country") or {}).get("code") == "US"
-                        and name.lower() in v.get("name", "").lower()):
+                        and name.lower() in v.get("name", "").lower() and keep_venue(v.get("name", ""), city.get("name"))):
                     found[v["id"]] = {"venue_key": key, "setlistfm_id": v["id"], "name": v["name"],
                                       "city": city.get("name"), "state": state}
             if page * res.get("itemsPerPage", 20) >= res.get("total", 0):
@@ -136,7 +150,21 @@ def write(df, name):
     print(f"wrote {dest} ({len(df):,} rows)", flush=True)
 
 
+def refilter():
+    """Re-apply the venue exclusions to existing outputs (no requests)."""
+    vdf = pd.read_parquet(OUT / "concert_venues.parquet")
+    keep = vdf[[keep_venue(n, c) for n, c in zip(vdf["name"], vdf["city"])]]
+    print("dropped venues:\n" + vdf[~vdf["setlistfm_id"].isin(keep["setlistfm_id"])].to_string(index=False))
+    write(keep, "concert_venues.parquet")
+    concerts = pd.read_parquet(OUT / "concerts.parquet")
+    write(concerts[concerts["setlistfm_id"].isin(keep["setlistfm_id"])], "concerts.parquet")
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--refilter", action="store_true")
+    if ap.parse_args().refilter:
+        return refilter()
     venues = [v for key, (state, names) in VENUES.items() for v in venue_ids(key, state, names)]
     vdf = pd.DataFrame(venues)
     print("matched venue ids (review these):\n" + vdf.sort_values(["venue_key", "name"]).to_string(index=False), flush=True)

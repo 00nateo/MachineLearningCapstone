@@ -13,7 +13,9 @@ Only events at venues in METRO cities (in and around both cities) are kept. Mapp
 to zones, including venues outside the zones, happens in export.py.
 The US Open 2020 was played without spectators (attendance set to 0).
 Past months are skipped once fetched; the last two months are refreshed.
+Usage: python scripts/fetch_sports.py [--refresh LEAGUE ...]   (re-fetch every month of those leagues)
 """
+import argparse
 import json
 import sys
 import time
@@ -49,6 +51,7 @@ METRO = {  # state -> venue cities kept (in or near the two cities)
     "NJ": {"East Rutherford", "Harrison", "Newark"},
     "IL": {"Chicago", "Evanston", "Rosemont", "Bridgeview"},
 }
+STATE_ABBR = {"New York": "NY", "New Jersey": "NJ", "Illinois": "IL"}  # MLB/MLS spell states out
 COLS = ["league", "event_id", "start_utc", "venue_id", "venue_name", "city", "state",
         "neutral_site", "attendance", "home", "away", "detail", "status"]
 
@@ -72,12 +75,13 @@ def day_rows(league, day):
         for c in e.get("competitions", []):
             v = c.get("venue") or {}
             a = v.get("address") or {}
-            if a.get("city") not in METRO.get(a.get("state"), ()):
+            state = STATE_ABBR.get(a.get("state"), a.get("state"))
+            if a.get("city") not in METRO.get(state, ()):
                 continue
             teams = {t.get("homeAway"): (t.get("team") or {}).get("displayName") for t in c.get("competitors", [])}
             rows.append({"league": league, "event_id": e.get("id"), "start_utc": c.get("date") or e.get("date"),
                          "venue_id": v.get("id"), "venue_name": v.get("fullName"), "city": a.get("city"),
-                         "state": a.get("state"), "neutral_site": c.get("neutralSite"),
+                         "state": state, "neutral_site": c.get("neutralSite"),
                          "attendance": c.get("attendance"), "home": teams.get("home"), "away": teams.get("away"),
                          "detail": None, "status": ((c.get("status") or {}).get("type") or {}).get("name")})
     return rows
@@ -125,13 +129,16 @@ def us_open(year):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--refresh", nargs="*", default=[], choices=list(LEAGUES))
+    refresh = set(ap.parse_args().refresh)
     today = date.today()
     refresh_after = (today.replace(day=1) - timedelta(days=62)).replace(day=1)
     for league in LEAGUES:
         first = START
         while first <= today:
             dest = OUT / "espn" / league / f"{first:%Y-%m}.parquet"
-            if not (dest.exists() and first < refresh_after):
+            if league in refresh or not (dest.exists() and first < refresh_after):
                 print(f"{league} {first:%Y-%m}: {fetch_month(league, first)} local events", flush=True)
             first = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
     tennis = [r for y in range(START.year, today.year + 1) if date(y, 8, 15) <= today for r in us_open(y)]
