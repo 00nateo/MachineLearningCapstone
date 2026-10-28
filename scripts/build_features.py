@@ -1,5 +1,10 @@
 #!/usr/bin/env python
-"""Build the model feature table: one row per zone x target hour h, per city and lead time k.
+"""SUPERSEDED: the team's feature builder is scripts/label.py + scripts/features.py
+(MODELING_PLAN.md), which `run_pipeline.sh features` and the training jobs use. This script is
+kept as a reference for extra features (dropoffs, NYC wait/pay, neighbours, holidays, drive
+times, lead time k = 2) that could be ported into features.py.
+
+Build the model feature table: one row per zone x target hour h, per city and lead time k.
 
 Input:  data/export/ (the published model-grain tables)
 Output: data/features/{city}_k{k}.parquet
