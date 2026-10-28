@@ -278,6 +278,15 @@ Add new candidates here with their dates as they come up.
   games only, skipping 2020-21 zero-attendance games) made no difference
   (F1 0.838 -> 0.837; major-event hours 0.799 -> 0.801). Crowd size isn't
   what the model misses on event hours.
+- **Surge label ("unexpected hotspots") as a second target.** The top-10% label
+  is mostly static (20 zones give 56% of hotspot hours). Proposed alternative:
+  pickups vs the zone's own normal-conditions baseline (8-week same-hour,
+  same-weekday median, excluding extreme hours and holidays), at 1.25x / 1.5x /
+  2x / 3x plus a count-aware z >= 3. Design, results and recommendation in
+  `SURGE_LABEL_DESIGN.md`; labels built by `scripts/surge_label.py`. First
+  model (`scripts/train_surge.py`, NYC fold 3): AUC-PR 0.46, F1 0.45 vs 0.34
+  for the best baseline ("surged last hour"); the deployable model matches the
+  full one. For the group to decide how far to take it after the milestone.
 
 ## Repo-level build plan
 
