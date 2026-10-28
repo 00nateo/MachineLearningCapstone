@@ -10,4 +10,6 @@ set -euo pipefail
 eval "$(conda shell.bash hook)"
 conda activate rideshare
 cd "$SLURM_SUBMIT_DIR"
-python scripts/build_features.py "$@"
+# Label + fold tags, then the model feature table (MODELING_PLAN.md). Optional args: city names.
+python scripts/label.py "$@"
+python scripts/features.py "$@"

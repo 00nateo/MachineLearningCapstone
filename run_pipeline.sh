@@ -4,7 +4,7 @@
 #   ACCOUNT=myalloc HF_REPO=... ./run_pipeline.sh process    # convert -> aggregate -> export -> upload
 #   ACCOUNT=myalloc ./run_pipeline.sh external               # external fetches only
 #   ACCOUNT=myalloc HF_REPO=... ./run_pipeline.sh export     # export -> upload (republish only)
-#   ACCOUNT=myalloc ./run_pipeline.sh features               # build feature tables from data/export
+#   ACCOUNT=myalloc ./run_pipeline.sh features               # label.py + features.py from data/export
 set -euo pipefail
 cd "$(dirname "$0")"
 
