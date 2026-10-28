@@ -146,3 +146,70 @@ across zones, strong event signal), with `surge_z3` as a sensitivity check that
 corrects the night-time bias, and `surge_200` / `surge_300` reported as severity
 tiers. Raising the volume floor at night (or using `surge_z3`) is the main open
 tuning question.
+
+## First model on `surge_150` (2026-10-28, NYC fold 3)
+
+Script: `scripts/train_surge.py` (new; reuses `train.py` / `baseline.py` /
+`evaluate.py` helpers unchanged). Job: 11 min on 32 cores, ~5 min per model fit.
+
+Setup:
+- **Rows:** only zone-hours where a surge is possible (baseline >= 10 rides/h).
+  Train: the same sampled, weighted days as the top-10% model (3.95M rows,
+  3.55% surge). Early stop: 2023 (1.97M rows). Calibrate: 2024 (1.99M rows,
+  3.3% surge). Test predicted but not scored.
+- **Inputs:** the top-10% model's whitelist (full or deployable), plus four
+  surge inputs known at forecast time: the zone's baseline for hour h (built
+  from earlier weeks), last hour's ratio to its baseline, and whether the zone
+  surged last hour / at this hour last week.
+- **Calls:** a probability cutoff chosen to maximize F1 on 2023, applied
+  unchanged to 2024 (0.21 full, 0.22 deployable). AUC-PR needs no cutoff and is
+  the headline metric.
+- **Baselines:** surged last hour (ratio at h-1 >= 1.5); surged at this hour last
+  week; the zone's historical surge rate (cutoff tuned on 2023).
+
+Results on the calibrate year (2024), all eligible zone-hours:
+
+| Model | AUC-PR | Precision | Recall | F1 |
+|---|---|---|---|---|
+| Surged last hour | 0.296 | 0.336 | 0.353 | 0.344 |
+| Surged at this hour last week | 0.078 | 0.147 | 0.151 | 0.149 |
+| Zone's historical surge rate | 0.066 | 0.095 | 0.143 | 0.114 |
+| **LightGBM, full** | **0.461** | 0.450 | 0.443 | **0.446** |
+| **LightGBM, deployable** | **0.464** | 0.458 | 0.438 | **0.448** |
+
+F1 by condition (2024):
+
+| Condition | LightGBM full | LightGBM deployable | Surged last hour |
+|---|---|---|---|
+| Normal | 0.444 | 0.445 | 0.340 |
+| Major event | 0.801 | 0.792 | 0.684 |
+| Severe weather | 0.505 | 0.496 | 0.437 |
+| Flight delays | 0.423 | 0.378 | 0.148 |
+| Transit disruption | 0.355 | 0.354 | 0.245 |
+| NWS warning | 0.341 | 0.360 | 0.314 |
+
+AUC-PR follows the same pattern (major event 0.90, severe weather 0.53-0.54,
+NWS 0.31, transit 0.32).
+
+Findings:
+- **Much harder task, but the model adds much more value.** AUC-PR 0.46 vs 0.94
+  on the top-10% label, but LightGBM beats the best baseline ("surged last
+  hour") by **+10 F1 points** (0.446 vs 0.344), compared with +1.8 points on the
+  static label. This is where a model earns its keep.
+- **Surges don't repeat weekly.** "Surged at this hour last week" (F1 0.15) and
+  the zone's historical surge rate (0.11) are weak, which confirms the label
+  isn't static.
+- **The deployable model matches the full one** (F1 0.448 vs 0.446). The
+  ridership "oracle" features that were worth ~2 F1 points on the top-10% label
+  don't help here, so this target is realistic for a production forecaster.
+- **Major-event surges are the most predictable** (F1 ~0.80, AUC-PR 0.90),
+  because events are scheduled. Severe-weather surges are above average (F1
+  ~0.50); NWS-warning and transit-disruption surges are the hardest (F1
+  0.34-0.36), plausibly because their timing isn't known in advance.
+- **Momentum and conditions matter more.** The top input is last hour's ratio to
+  baseline, then zone and the baseline; temperature and visibility enter the top
+  10, unlike in the top-10% model where conditions carried < 2% of the gain.
+
+Next steps (not done): the abstention layer on this label (minority class at
+3.3% will strain it), per-condition intervals, the `surge_z3` sensitivity run,
+and Chicago.

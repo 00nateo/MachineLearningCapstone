@@ -283,8 +283,10 @@ Add new candidates here with their dates as they come up.
   pickups vs the zone's own normal-conditions baseline (8-week same-hour,
   same-weekday median, excluding extreme hours and holidays), at 1.25x / 1.5x /
   2x / 3x plus a count-aware z >= 3. Design, results and recommendation in
-  `SURGE_LABEL_DESIGN.md`; labels built by `scripts/surge_label.py`. Not yet
-  trained on; for the group to decide after the milestone.
+  `SURGE_LABEL_DESIGN.md`; labels built by `scripts/surge_label.py`. First
+  model (`scripts/train_surge.py`, NYC fold 3): AUC-PR 0.46, F1 0.45 vs 0.34
+  for the best baseline ("surged last hour"); the deployable model matches the
+  full one. For the group to decide how far to take it after the milestone.
 
 ## Repo-level build plan
 
