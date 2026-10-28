@@ -5,6 +5,142 @@ grain, and published to a Hugging Face dataset by the pipeline in
 `scripts/`. The modeling plan built on top of that dataset is in
 `MODELING_PLAN.md`.
 
+## Event categories, named days, and remote trip endpoints
+
+Broad contexts are **sports, concerts, federal holidays, elections, cultural
+days (currently Halloween), and road races (currently NYC Marathon)**. These
+are overlapping labels, not an event-type prediction target. The model predicts
+surge hotspots conditional on the category and time. Sports/concert windows
+default to 3 hours before, the scheduled start through estimated end, and
+3 hours after. An hour overlapping a boundary may have two phases. The cached
+concert pipeline assumes 19:30–23:00; use more reliable times before making
+precise departure claims. US Open counts are matches, not distinct crowds.
+
+Build context for every hour in the cached demand panels:
+
+```sh
+source .venv-torch/bin/activate
+python scripts/build_calendar.py --city nyc chicago
+python scripts/build_event_context.py --city nyc chicago
+python scripts/evaluate_event_context.py --city nyc --zone-summary
+```
+
+The calendar builder appends `calendar_*` annotations to existing local feature
+files atomically, and writes daily sidecars even for a city without built
+features. It leaves labels and model predictor allowlists as they are.
+Rules are audited for 2018–2026. Federal holidays distinguish actual and
+weekday observed dates ([OPM](https://www.opm.gov/policy-data-oversight/pay-leave/federal-holidays/));
+Halloween, Thanksgiving/adjacent days, Christmas/New Year's eves, marathon
+and adjacent days, and DST changes are flagged. The in-person 2020 marathon
+is [canceled](https://www.nyrr.org/tcsnycmarathon/pages/2020-cancellation), not flagged active.
+Elections cover annual November general elections in NYC, even-year November
+general elections in Chicago, and verified Chicago 2019/2023 municipal rounds.
+Primaries, special elections, and early voting are not covered.
+The sourced catalog and `calendar_metadata.json` record scope and provenance.
+
+`*_event_context.parquet` contains citywide category counts by phase and all
+named-day flags, with no target-hour demand or actual attendance added.
+`*_event_exclusions.parquet` masks the **union of all mapped active sports/concert
+venue zones**, including before/after windows across midnight. Transit entry
+zones remain candidates. Outside-city/unmapped venues have no known city zone
+to mask; inspect `*_event_coverage.csv`. Calendar contexts are citywide and
+have no venue mask. The marathon route has not been mapped/excluded yet.
+The event catalog is a retrospective snapshot, not a record of what schedule
+information was published at each historical forecast time.
+
+The frozen evaluator reuses saved calls and scores on early-stop/calibration
+only. `data/results/nyc_fold3_event_context_metrics.csv` includes overall,
+ordinary hours, categories, windows, and individual calendar flags, both with
+and without venue masking. It includes negatives, date/hour counts, confusion
+counts, precision/recall/F1/AP, and differences from the same-scope overall
+metric. Groups overlap and holiday/election samples can have just one date.
+`*_zones.csv` ranks mean model scores and reports marginal pickups/dropoffs;
+these are descriptive zone totals, not linked trips or causal event effects.
+
+For NYC fold 3, the existing improved full Torch model on **2024 off-venue
+eligible pickup-surge rows** has F1 0.445 overall, 0.414 on sports windows,
+0.471 on concert windows, and 0.745 on federal holidays. Election Day is
+0.162 and Marathon Day 0.212, each on one date; the marathon also overlaps
+DST fall-back, where the source merges two 01:00 hours. These are diagnostics,
+not category-specific guarantees. Test rows remain unscored.
+
+Train a separate pickup-surge experiment using event context on the Mac GPU:
+
+```sh
+python scripts/train_surge_torch.py --city nyc --device mps \
+  --variant deployable --event-context --off-venue --run-name events_offvenue
+python scripts/evaluate_event_context.py --city nyc --pred \
+  data/processed_ml/nyc_fold3_surge150_torch_deployable_events_offvenue_pred.parquet \
+  data/processed_ml/nyc_fold3_surge150_torch_improved_pred.parquet \
+  data/processed_ml/nyc_fold3_surge150_pred.parquet \
+  data/processed_ml/nyc_fold3_surge150_deployable_pred.parquet
+```
+
+`--off-venue` excludes venue targets from both training and saved predictions;
+the category inputs stay citywide. This remains the existing **pickup surge**
+target. It does not yet train a dropoff or venue-linked endpoint classifier.
+The first MPS run restored epoch 25 (about one minute fit) and selected its
+threshold on 2023 only. On the same 2024 off-venue rows, F1 is 0.448 overall,
+0.418 for sports and 0.480 for concerts, compared with 0.445/0.414/0.471 for
+the earlier improved full Torch model. This is a new feature/availability/mask
+configuration, not an isolated test of the category features. Some groups got
+worse (Halloween F1 0.434 versus 0.512); the one-date marathon result is 0.581
+versus 0.212. These observations do not establish a general improvement.
+Checkpoints carry the feature names and context/mask settings. For inference,
+rebuild context for the target schedule, call `event_context.attach()` on
+calendar/enhanced predictor rows, then the existing restore/predict helpers
+and saved threshold policy. `deployable` still assumes access to timely
+pickup counts and retains the documented flight-publication caveat.
+
+For actual trip links, use the **cluster** data without copying raw trips to
+the Mac. `aggregate_event_trips.py` streams one monthly Parquet at a time:
+
+- Arrivals: non-venue pickup zone → venue, before/during the event.
+- Departures: venue → non-venue dropoff zone, during/after the event.
+- Only the remote endpoint is a candidate hotspot. Other active mapped venues
+  are excluded there too. Overlapping windows in the same category/phase/venue
+  are unioned before joining, so one trip is counted once within that group.
+- The same windows 1–4 weeks earlier provide weekday/time controls. Controls
+  can themselves contain events; treat them as observational comparisons and
+  check contamination before constructing uplift labels.
+
+Start with a one-month pilot. From the cluster repo, substitute the actual
+converted NYC directory; the glob must include December 2023 for January's
+controls. Original TLC monthly `fhvhv_tripdata_YYYY-MM.parquet` also works.
+Chicago requires the converted monthly schema from `convert.py`.
+
+```sh
+mkdir -p logs
+sbatch slurm/10_event_trips.sbatch --city nyc \
+  --trip-glob '/cluster/path/data/processed/nyc_fhvhv/*.parquet' \
+  --start-date 2024-01-01 --end-date 2024-01-31 \
+  --out data/event_trips/nyc_2024jan_pilot
+```
+
+The job uses the existing `rideshare` conda environment and `normal_q` partition,
+8 CPU cores, a 16 GB allocation, and an 8 GB DuckDB budget. No GPU is needed for
+aggregation. Run the same Python command directly inside an appropriate compute
+allocation if Slurm configuration differs; `--temp-dir` can use cluster scratch.
+The pilot runtime/output size must be measured before choosing a full-run budget.
+
+Output is additive `part-YYYY-MM.parquet` counts keyed by `reference_hour`,
+`category`, `phase`, `direction`, `period` (event/control week), and `remote_zone`.
+Sum shards by these keys because arrivals can cross input-month boundaries.
+`exposures.parquet` records actual observed hours, reference event hours,
+window minutes per venue, and whether required month files are present.
+Month-file presence does not establish day-level completeness; audit that
+against the cluster data manifest. Missing coverage must not become a zero
+training label. Only consume a run when `manifest.json` has `status: complete`.
+The manifest fingerprints the event catalog and records input file metadata.
+Use a fresh output directory for each run.
+
+Transfer only the aggregate directory back. The next modeling stage is to join
+remote endpoint counts/coverage to category, zone and known-ahead features,
+form separate arrival-origin and departure-destination targets, and evaluate
+with chronological splits and all eligible non-venue zones (including zeros).
+These venue-associated trips do not prove attendance. Citywide holidays and
+elections use their own date cohorts; there is no single venue to anchor them.
+
 ## Apple GPU neural-network comparison
 
 `scripts/train_torch.py` adds a tabular PyTorch classifier alongside LightGBM.
@@ -67,6 +203,157 @@ Existing LightGBM filenames and default evaluation commands are preserved.
 Checks: `.venv-torch/bin/python -m unittest discover -s tests -v` exercises
 training-only preprocessing, both feature variants, checkpoint reloads,
 evaluation/conformal outputs, and MPS training when available.
+
+## Apple GPU surge model and onset analysis
+
+`scripts/train_surge_torch.py` trains the **surge_150** target (pickups >=
+1.5 times the zone's past-only normal baseline, baseline >= 10 rides/hour).
+It reuses the existing surge labels and training-day sample, plus exactly the
+LightGBM surge model's predictors: the shared whitelist and `surge_baseline`,
+`ratio_lag1`, `surge_lag1`, `surge_lag168` in `--features basic` mode. The MLP, train-only scaling and
+weighted GPU training loop are shared with `train_torch.py`, including the
+validation-loss learning-rate scheduler. Test predictions are saved, never scored.
+The enhanced feature set and guarded joint threshold policy described below are
+now the defaults; basic/global mode reproduces the original experiment.
+
+```sh
+source .venv-torch/bin/activate
+python scripts/train_surge_torch.py --city nyc --device mps
+python scripts/train_surge_torch.py --city nyc --device mps --variant deployable
+```
+
+The script automatically reports overall performance, conditions, and these
+prior-state groups for the neural model, persistence baselines, and saved
+LightGBM surge predictions when available:
+
+| Group | Eligible evaluation rows | Positive outcome | Negative outcome |
+|---|---|---|---|
+| onset | previous hour was not a surge | a surge starts now | stays non-surge (a positive call is a false alarm) |
+| continuation | previous hour was a surge | surge continues | surge ends (a positive call is a false alarm) |
+| unknown_history | missing prior label or a local clock-hour gap | current surge | current non-surge |
+
+These are risk sets, not positive-only subsets. Precision, recall, F1,
+average precision, confusion counts, positive counts and false alarms per
+1,000 negative zone-hours are recorded. Undefined metrics (e.g. precision
+when no positives are predicted) are blank, rather than a claimed perfect
+score. History is computed before volume filtering or training sampling;
+clock-hour gaps, including spring DST jumps, stay unknown. The existing
+row-based predictor lags are retained to match the LightGBM experiment.
+Fall-back merged hours follow the dataset's local-hour convention.
+
+This is phase evaluation of a model trained on all surge-eligible hours. It
+does not yet train a separate onset classifier or predict multiple hours
+before onset. The strict `persistence_label` baseline necessarily has zero
+onset recall; the model must improve on that while controlling false alarms.
+The older `surged_last_hour` baseline is retained for comparison: it thresholds
+the previous ratio without the previous hour's volume floor, so its calls can
+differ from persistence of the actual surge label.
+
+Outputs use `nyc_fold3_surge150_torch[_deployable][_{run_name}]` (the current
+default run suffix is `improved`): model/preprocessing and
+cutoff in `data/models/*.pt`, all held-out predictions/history metadata in
+`data/processed_ml/*_pred.parquet`, and `*_metrics.csv`, `*_phases.csv`,
+`*_history.csv` in `data/results/`. CPU surge and original hotspot artifacts
+keep their existing names. Use `--run-name experiment1` to give a tuning run
+its own filenames. `--cache-device` can reduce batch transfers at a higher
+memory cost. As with the CPU model, "deployable" retains the documented
+flight-data availability assumptions; GPU training does not resolve them.
+
+Re-evaluate saved predictions without retraining:
+
+```sh
+python scripts/evaluate_surge.py --city nyc --model torch --run-name improved
+python scripts/evaluate_surge.py --city nyc --model lightgbm --variant deployable
+```
+
+Pass the same `--run-name` when analyzing a named neural run. Saved LightGBM
+calls are reused without refitting a cutoff, and are enriched with prior-hour
+labels from the surge table. Analysis files get an `_analysis` suffix.
+Use 2023/`early_stop` for model selection; the reported calibration metrics
+are preliminary evaluation and should not be used to select hyperparameters.
+
+### Improved features and guarded threshold selection
+
+The default command now uses `--features enhanced --threshold-mode auto
+--run-name improved`, preserving the original unsuffixed run. Enhanced inputs
+add 2/3/24-hour lagged ratios, their recent mean and changes, pickup growth,
+the four-week same-hour pickup mean, last-hour pickups relative to the target
+hour's known baseline, log counts, and sine/cosine calendar encodings. All
+windows are computed on the full series before sampling; no current pickup,
+current ratio or current surge label becomes a predictor. `--features basic`
+retains the original feature contract for ablation comparisons.
+
+Joint decision thresholds optimize **pooled overall F1**, not the average of
+onset and continuation F1. By default their fit-time precision must be at least
+that of the best global F1 threshold. `--min-precision 0.50` instead requests
+an explicit validation precision floor. This can reduce recall/F1, and it is
+not a guarantee of future precision.
+
+In `--threshold-mode auto`, the first half of the validation hours fits a
+global rule and a joint rule. The later half checks both. A joint rule is
+selected only if it improves pooled F1 by at least 0.001 without reducing
+precision; otherwise the global rule is retained. The chosen kind of rule is
+then refitted on all `early_stop` rows. This is a tuning safeguard within the
+year already used for model early stopping, not an independent test result.
+Unknown history always uses the global fallback. Calibrate/test labels never
+select a rule. `--threshold-mode global` disables phase thresholds;
+`--threshold-mode joint` explicitly bypasses the temporal safeguard for an
+exploratory fit. Both respect an explicit precision floor when supplied.
+
+```sh
+python scripts/train_surge_torch.py --city nyc --device mps
+python scripts/train_surge_torch.py --city nyc --device mps --min-precision 0.50 --run-name precision50
+python scripts/train_surge_torch.py --city nyc --device mps --features basic --threshold-mode global --run-name basic_control
+python scripts/evaluate_surge.py --city nyc --model torch --run-name improved
+```
+
+The saved checkpoint contains `threshold_policy`; apply it with
+`surge_thresholds.apply_policy(frame, checkpoint['threshold_policy'])` after
+producing `score` and providing the past-known `previous_surge` metadata.
+Do not apply the reference scalar `cutoff` to all rows when the selected rule
+is joint. Predictions record each row's `decision_threshold`, and a JSON
+policy file plus `*_threshold_selection.csv` audit file record the selection
+and later-validation checks. The console now shows validation metrics before
+calibration metrics. The evaluator reuses saved calls; it never refits them.
+
+First enhanced/joint run (NYC fold 3, fixed configuration, 2026-10-28):
+the temporal threshold check selected the joint rule: on the later 2023
+validation hours, pooled F1 rose 0.4819 -> 0.4843 and precision 0.4693 ->
+0.5046 compared with a global rule fitted on the earlier hours. Refitting
+on all validation hours gave onset/continuation/fallback cutoffs
+0.2444 / 0.1839 / 0.2226. Best epoch 37; fit about 1.1 minutes on MPS.
+
+The subsequent 2024 calibration results (not used for selection) were:
+
+| Model | Average precision | Precision | Recall | F1 |
+|---|---|---|---|---|
+| Original Torch reference | 0.4491 | 0.4500 | 0.4271 | 0.4382 |
+| Enhanced Torch + guarded joint rule | 0.4664 | 0.4951 | 0.4147 | 0.4513 |
+| LightGBM full reference | 0.4616 | 0.4713 | 0.4232 | 0.4459 |
+
+This improves pooled precision/F1 in one run, not every subgroup metric:
+onset precision improves 0.3105 -> 0.3789, but onset recall falls
+0.2009 -> 0.1747 and onset F1 changes 0.2440 -> 0.2392. Its onset average
+precision rises 0.2141 -> 0.2329, indicating a ranking improvement despite
+the more conservative chosen onset calls. Phase-specific tradeoffs remain
+visible in `*_phases.csv`. Repeated-seed/paired-interval checks are pending;
+do not treat small differences from LightGBM as established superiority.
+
+Initial NYC fold-3 GPU run (full variant, fixed defaults, 2026-10-28):
+best epoch 44, cutoff 0.2069 selected on 2023, fit about 1.1 minutes on the
+Apple GPU. On 2024, neural overall F1 is 0.4391 versus 0.4459 for the saved
+full LightGBM model. By prior state:
+
+| Model | Onset precision / recall / F1 | Continuation precision / recall / F1 |
+|---|---|---|
+| PyTorch full | 0.3255 / 0.1879 / 0.2383 | 0.5704 / 0.8533 / 0.6837 |
+| LightGBM full | 0.3281 / 0.2085 / 0.2549 | 0.5957 / 0.8372 / 0.6961 |
+| LightGBM deployable | 0.3252 / 0.2144 / 0.2584 | 0.5897 / 0.8465 / 0.6952 |
+
+There are 42,568 true onset hours and 21,965 continuation hours, plus 226
+positive hours with unknown history. These results identify new-surge onset
+as the harder problem; they do not establish GPU accuracy gains. Test remains
+unscored. Confidence intervals for phase-specific differences are still pending.
 
 ## Progress so far
 

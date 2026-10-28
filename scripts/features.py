@@ -324,6 +324,9 @@ def features_city(con, city):
     else:
         transit_table_chicago(con)
         assemble_chicago(con)
+    # Persist calendar annotations for subgroup analysis without changing model allowlists.
+    from calendar_flags import build_for_city
+    build_for_city(city)
 
 
 def main():

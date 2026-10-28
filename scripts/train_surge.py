@@ -33,38 +33,7 @@ from baseline import PROC_ML, RESULTS
 from evaluate import CONDITIONS, FLAGS
 from train import (CITY_FEATURES, DEPLOYABLE_ONLY, EARLY_STOP_ROUNDS, MAX_ROUNDS, MODELS, N_ZONES, PARAMS,
                    TABLE_FEATURES, add_calendar, inputs)
-
-LABEL = "surge_150"
-VOLUME_FLOOR = 10
-SURGE_INPUTS = ["surge_baseline", "ratio_lag1", "surge_lag1", "surge_lag168"]
-
-
-def load(con, city, fold):
-    feats = ", ".join(f"f.{c}::DOUBLE AS {c}" for c in TABLE_FEATURES + CITY_FEATURES[city] + DEPLOYABLE_ONLY)
-    con.execute(f"""
-        CREATE OR REPLACE TEMP TABLE surge_rows AS
-        WITH j AS (
-            SELECT f.zone, f.hour, f.{fold} AS split, {feats}, {', '.join(f'f.{c}' for c in FLAGS)},
-                   s.{LABEL} AS y, s.baseline AS surge_baseline,
-                   lag(s.ratio, 1) OVER w AS ratio_lag1,
-                   lag(s.{LABEL}::DOUBLE, 1) OVER w AS surge_lag1,
-                   lag(s.{LABEL}::DOUBLE, 168) OVER w AS surge_lag168,
-                   lag(s.ratio, 168) OVER w AS ratio_lag168
-            FROM read_parquet('{PROC_ML / f'{city}_features.parquet'}') f
-            JOIN read_parquet('{PROC_ML / f'{city}_surge.parquet'}') s USING (zone, hour)
-            WINDOW w AS (PARTITION BY f.zone ORDER BY f.hour))
-        SELECT * FROM j WHERE surge_baseline >= {VOLUME_FLOOR} AND split IS NOT NULL""")
-    train = con.execute(f"""
-        SELECT r.*, t.weight FROM surge_rows r
-        JOIN read_parquet('{PROC_ML / f'{city}_{fold}_train.parquet'}') t USING (zone, hour)
-        WHERE r.split = 'train'""").df()
-    held = con.execute("""SELECT * FROM surge_rows WHERE split IN ('early_stop', 'calibrate', 'test')
-                          ORDER BY hour, zone""").df()
-    for d in (train, held):
-        d["y"] = d["y"].astype(bool)
-        d[FLAGS] = d[FLAGS].astype(bool)
-    return add_calendar(train, city), add_calendar(held, city)
-
+from surge_data import LABEL, SURGE_INPUTS, VOLUME_FLOOR, best_cutoff, load
 
 def matrix(df, city, variant):
     X = df[inputs(city, variant) + SURGE_INPUTS].copy()
@@ -72,13 +41,6 @@ def matrix(df, city, variant):
     for c in X.columns.drop("zone"):
         X[c] = X[c].astype("float32")
     return X
-
-
-def best_cutoff(y, score):
-    """Score cutoff maximizing F1 (chosen on early_stop, applied unchanged later)."""
-    p, r, t = precision_recall_curve(y, score)
-    f1 = 2 * p[:-1] * r[:-1] / np.maximum(p[:-1] + r[:-1], 1e-12)
-    return t[np.argmax(f1)]
 
 
 def scores(y, score, call):

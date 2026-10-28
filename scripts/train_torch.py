@@ -62,8 +62,8 @@ class Preprocessor:
     observed: np.ndarray
 
     @classmethod
-    def fit(cls, df, city, variant):
-        columns = [c for c in inputs(city, variant) if c != "zone"]
+    def fit(cls, df, city, variant, extra_features=()):
+        columns = [c for c in inputs(city, variant) if c != "zone"] + list(extra_features)
         # Per-column statistics avoid a full float64 copy of a multi-million-row matrix.
         means, scales, observed = [], [], []
         for col in columns:
@@ -117,11 +117,11 @@ class HotspotMLP(nn.Module):
         return self.network(torch.cat([self.zone_embedding(zone), numeric], dim=1)).squeeze(-1)
 
 
-def tensors(df, prep, device=None, training=False):
+def tensors(df, prep, device=None, training=False, target="hotspot"):
     z, x = prep.transform(df)
     values = [torch.from_numpy(z), torch.from_numpy(x)]
     if training:
-        y = df["hotspot"].to_numpy(dtype=np.float32, na_value=np.nan)
+        y = df[target].to_numpy(dtype=np.float32, na_value=np.nan)
         w = df["weight"].to_numpy(dtype=np.float32, na_value=np.nan)
         if not np.isin(y, [0, 1]).all() or not (np.isfinite(w) & (w > 0)).all():
             raise ValueError("Training labels must be 0/1 and sample weights must be finite and positive")
@@ -168,29 +168,35 @@ def restore(path, device="cpu"):
     return model.to(device).eval(), prep, checkpoint
 
 
-def train(city, fold, args):
-    started = time.perf_counter()
+def fit_network(train_df, es, city, args, extra_features=(), target="hotspot"):
+    """Shared weighted training loop; all preprocessing/selection uses train/early_stop.
+
+    The surge trainer supplies target='y' and additional past-only context features.
+    The scheduler added to the original hotspot trainer is shared here unchanged.
+    """
     device = select_device(args.device)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.set_num_threads(args.threads)
-    tag = artifact_tag(city, fold, "torch", args.variant)
-    print(f"{tag}: device={device}, batch_size={args.batch_size}, cache_device={args.cache_device}", flush=True)
-    with duckdb.connect() as con:
-        train_df, held = load(con, city, fold, args.variant, args.data_dir)
-    es = held[held["split"] == "early_stop"]
-    if es.empty or train_df.empty or train_df["hotspot"].nunique() < 2:
+    if es.empty or train_df.empty or train_df[target].nunique() < 2:
         raise ValueError("Need both classes in training and a nonempty early_stop split")
-    prep = Preprocessor.fit(train_df, city, args.variant)
+    prep = Preprocessor.fit(train_df, city, args.variant, extra_features)
     cache = device if args.cache_device else None
-    train_values = tensors(train_df, prep, cache, training=True)
+    train_values = tensors(train_df, prep, cache, training=True, target=target)
     valid_values = tensors(es, prep, cache)
-    valid_y = torch.tensor(es["hotspot"].to_numpy(dtype=np.float32), device=cache)
+    valid_y = torch.tensor(es[target].to_numpy(dtype=np.float32), device=cache)
     architecture = dict(n_zones=N_ZONES[city], n_numeric=2 * len(prep.columns),
                         hidden=list(args.hidden), embedding_dim=args.embedding_dim, dropout=args.dropout)
     model = HotspotMLP(**architecture).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=2,
+            min_lr=1e-5,
+            )
     generator = torch.Generator().manual_seed(args.seed)
     initial_loss = validation_loss(model, valid_values, valid_y, args.eval_batch_size, device)
     print(f"{len(train_df):,} training rows, {len(es):,} validation rows; initial log loss={initial_loss:.6f}", flush=True)
@@ -211,12 +217,14 @@ def train(city, fold, args):
             total_loss += numerator.detach()
             total_weight += denominator.detach()
         val_loss = validation_loss(model, valid_values, valid_y, args.eval_batch_size, device)
+        scheduler.step(val_loss)
         train_loss = (total_loss / total_weight).item()
         if not np.isfinite([train_loss, val_loss]).all():
             raise ValueError("Training diverged; lower --lr and inspect input values")
         seconds = time.perf_counter() - epoch_start
         history.append(dict(epoch=epoch, train_logloss=train_loss, early_stop_logloss=val_loss,
-                            seconds=seconds, rows_per_second=len(train_df) / seconds))
+                            seconds=seconds, rows_per_second=len(train_df) / seconds,
+                            learning_rate=optimizer.param_groups[0]["lr"]))
         print(f"epoch {epoch:03d}: train={train_loss:.6f} early_stop={val_loss:.6f} ({seconds:.1f}s)", flush=True)
         if val_loss < best_loss - args.min_delta:
             best_loss, best_epoch = val_loss, epoch
@@ -224,9 +232,23 @@ def train(city, fold, args):
         elif epoch - best_epoch >= args.patience:
             print(f"Early stopping; restoring epoch {best_epoch}.", flush=True)
             break
-    fit_seconds = time.perf_counter() - started
     model.load_state_dict(best_state)
-    del train_values, valid_values, valid_y, es
+    state = dict(state_dict=best_state, preprocessing=prep.state(), architecture=architecture,
+                 best_epoch=best_epoch, best_logloss=best_loss, initial_logloss=initial_loss,
+                 torch_version=str(torch.__version__))
+    return model, prep, state, history
+
+
+def train(city, fold, args):
+    started = time.perf_counter()
+    device = select_device(args.device)
+    tag = artifact_tag(city, fold, "torch", args.variant)
+    print(f"{tag}: device={device}, batch_size={args.batch_size}, cache_device={args.cache_device}", flush=True)
+    with duckdb.connect() as con:
+        train_df, held = load(con, city, fold, args.variant, args.data_dir)
+    model, prep, state, history = fit_network(train_df, held[held["split"] == "early_stop"], city, args)
+    fit_seconds = time.perf_counter() - started
+    best_epoch = state["best_epoch"]
     train_rows = len(train_df)
     del train_df
     name = model_name("torch", args.variant)
@@ -242,10 +264,8 @@ def train(city, fold, args):
                                     params=json.dumps(config, sort_keys=True))
     for directory in (args.model_dir, args.results_dir):
         directory.mkdir(parents=True, exist_ok=True)
-    checkpoint = dict(state_dict=best_state, preprocessing=prep.state(), architecture=architecture,
-                      config=config, city=city, fold=fold, variant=args.variant, features=inputs(city, args.variant),
-                      best_epoch=best_epoch, best_logloss=best_loss, initial_logloss=initial_loss,
-                      fit_seconds=fit_seconds, torch_version=str(torch.__version__))
+    checkpoint = dict(state, config=config, city=city, fold=fold, variant=args.variant,
+                      features=inputs(city, args.variant), fit_seconds=fit_seconds)
     torch.save(checkpoint, args.model_dir / f"{tag}.pt")
     held[["zone", "hour", "split", "hotspot", "score", "call", *FLAGS]].to_parquet(
         args.data_dir / f"{tag}_pred.parquet", compression="zstd", index=False)
@@ -288,14 +308,18 @@ def parser():
     return ap
 
 
-def main():
-    ap = parser()
-    args = ap.parse_args()
+def validate_args(ap, args):
     if min(args.epochs, args.patience, args.batch_size, args.eval_batch_size,
            args.embedding_dim, args.threads, *args.hidden) < 1:
         ap.error("epoch, patience, batch, embedding, thread and hidden-layer sizes must be positive")
     if not 0 <= args.dropout < 1 or args.lr <= 0 or args.weight_decay < 0 or args.min_delta < 0:
         ap.error("need 0 <= dropout < 1, lr > 0, weight_decay >= 0 and min_delta >= 0")
+
+
+def main():
+    ap = parser()
+    args = ap.parse_args()
+    validate_args(ap, args)
     try:
         for city in args.city:
             for fold in args.fold:
