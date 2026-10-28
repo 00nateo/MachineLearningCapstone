@@ -92,8 +92,17 @@ correct):
   Chicago's flag to 2.75x NYC's (220.5k vs 88.5k total warning-hours before
   the filter; 26.8k vs 29.0k after — comparable). This phenomena list is a
   reasonable first pass, not verified code-by-code against the official NWS
-  VTEC table — worth a second look before the final report. Rate: ~2.5%
-  (NYC) / ~3.2% (Chicago) of hours.
+  VTEC table — worth a second look before the final report. **Corrected
+  again (2026-10-28):** (1) warning times were read as local instead of UTC,
+  shifting every window 4-5 h late — now converted with
+  `timezone(tz, timezone('UTC', ts))`; (2) `city` only names the NWS office,
+  whose area runs far beyond the city (LOT covers ~20 counties), so warnings
+  are now kept only if they name a county/zone covering the city (`NWS_UGC`
+  in `features.py`: NYC's five borough counties + their six zones; Cook
+  County + its zones). Check: the Jan 2022 blizzard is now flagged
+  01-28 19:00 -> 01-29 16:00 local (was midnight-to-midnight on the 29th).
+  Rate: ~1.3% (NYC) / ~1.6% (Chicago) of hours, 2019-01 -> 2026-08 (was
+  ~2.5% / ~3.2% before these two fixes).
 - **Major event**: within [event start - 1h, end + 1h] where attendance >=
   15,000. Verified directly against a known doubleheader weekend at Madison
   Square Garden (zone 186, not the Midtown zones 161-164 it's easy to guess
@@ -121,8 +130,32 @@ correct):
   Ridge, not Clearing).
 - **Composite "extreme" flag** = union of the above. Used both as the
   stress-test subgroup and as the upweight/always-keep flag in training
-  sampling. Final rate: ~11.9% of NYC hours, ~9.8% of Chicago hours —
-  comparable across cities, in the same ballpark as the ~10% hotspot rate.
+  sampling. Final rate: ~10.9% of NYC hours, ~8.4% of Chicago hours (was
+  11.9% / 9.8% before the NWS fixes) — comparable across cities, in the same
+  ballpark as the ~10% hotspot rate.
+
+## Case-study days
+
+Specific hectic days to examine one by one on the test set, beyond the
+aggregate extreme-condition subsets: how the model and the abstention layer
+behave hour by hour around each. All fall in fold 3's test period (2025+).
+Add new candidates here with their dates as they come up.
+
+- **Knicks win the 2026 NBA title — 2026-06-13.** Game 5 of the Finals,
+  away at San Antonio (Frost Bank Center), tip-off 20:30 ET; Knicks won
+  94-90 to take the series 4-1. Look at NYC the night of 06-13 into the
+  early hours of 06-14 (watch parties, street celebrations, especially
+  around MSG/Midtown), plus the championship parade (date not recorded
+  yet — add it). Related: the two home Finals games at MSG, 2026-06-08
+  (Game 3, loss) and 2026-06-10 (Game 4, win), which are in `events.parquet`.
+  The clinching game itself is *not* in `events.parquet` (only games at
+  NYC/Chicago-area venues are kept), so the model gets no event signal for
+  that night — a good test of how it handles an unscheduled-looking surge.
+- **2026 FIFA World Cup matches in the NY/NJ area** (MetLife Stadium,
+  including the final), plus fan-zone / watch-party nights. Dates still to
+  list. World Cup games are not in the event data yet (would need the ESPN
+  `soccer/fifa.world` league added to `fetch_sports.py`; MetLife would then
+  map to the Penn Station / Port Authority entry zones).
 
 ## Steps
 
@@ -212,7 +245,8 @@ Interpretation; Completion Plan/Record/Contributions/Writing.
   run for both cities. Three threshold bugs found and fixed by checking
   against real data instead of trusting first-draft defaults (transit
   disruption, NWS phenomena, flight delay rate — see Extreme-condition flags
-  above for the numbers). Final `extreme_flag` rate: 11.9% NYC, 9.8% Chicago.
+  above for the numbers). Final `extreme_flag` rate: 11.9% NYC, 9.8% Chicago;
+  10.9% / 8.4% after the 2026-10-28 NWS timezone + county-filter fixes.
 - **Week 3 — NEXT. Baselines + first model.** `baseline.py` (both baselines) +
   `train.py` on NYC fold 3, scored on calibrate. This is the required
   preliminary result.
