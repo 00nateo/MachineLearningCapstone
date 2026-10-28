@@ -1,0 +1,6 @@
+{
+  "days_per_month": 20,
+  "extreme_weight": 3.0,
+  "seed": "rideshare-capstone",
+  "folds": "see MODELING_PLAN.md / label.py"
+}
