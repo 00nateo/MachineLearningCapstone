@@ -112,9 +112,15 @@ correct):
 - **Transit disruption**: NYC via `mta_alerts_hour` (NYCT Subway agency) —
   **corrected** from ">=1 suspension update or >=3 routes affected" after
   finding the median hour already has 4 routes affected from routine
-  schedule-change alerts (that threshold fired 68.5% of the time). Now
-  >=3 suspension updates (~99th percentile) OR >=10 routes affected (~95th
-  percentile). Chicago has no alerts table; approximate with a CTA
+  schedule-change alerts (that threshold fired 68.5% of the time). Then
+  >=3 suspension updates OR >=10 routes affected — **corrected again
+  (2026-10-28)** because that still fired in 8.3% of hours, mostly through
+  the routes condition, which isn't comparable over time (MTA's alert
+  system changed in 2020-04 and newer alerts list more routes: ">=10
+  routes" went from 0.8% of hours in 2019 to 14.1% in 2020). **Now >=3
+  suspension updates only** (~98.5th percentile): 2.3% of hours, in line
+  with severe weather. 2019 still flags less (0.6%) because the old
+  archive's labels were coarser. Chicago has no alerts table; approximate with a CTA
   ridership-anomaly proxy (daily entries < 0.5x the trailing 4-week
   same-weekday average, zone-day grain broadcast to every hour of that day)
   — this one was fine at first pass (~2.0% of days), flagged as a weaker
@@ -130,9 +136,10 @@ correct):
   Ridge, not Clearing).
 - **Composite "extreme" flag** = union of the above. Used both as the
   stress-test subgroup and as the upweight/always-keep flag in training
-  sampling. Final rate: ~10.9% of NYC hours, ~8.4% of Chicago hours (was
-  11.9% / 9.8% before the NWS fixes) — comparable across cities, in the same
-  ballpark as the ~10% hotspot rate.
+  sampling. Final rate: **~5.1% of NYC hours, ~8.4% of Chicago hours** (was
+  11.9% / 9.8% originally, then 10.9% / 8.4% after the NWS fixes, then 5.1%
+  for NYC after the transit fix). NYC's composite is now driven by subway
+  suspensions (2.3%) and severe weather (~1.8%) rather than routine alerts.
 
 ### How the composite `extreme_flag` works
 
@@ -249,6 +256,27 @@ Add new candidates here with their dates as they come up.
 - Final numeric tuning of the extreme-condition thresholds above.
 - Whether to add a longer horizon for whole-shift recommendations (beyond
   k = 1 / k = 2).
+- **Feature availability at forecast time (proposed "deployable" ablation).**
+  The 1-hour lag only matches reality for sources published in real time.
+  Observed publication delays as of the 2026-10-27 fetch: weather (METAR) and
+  NWS warnings are live; MTA hourly ridership ran ~2 weeks behind; CTA daily
+  ridership ~3 months; BTS flights and TLC/Chicago trip records ~2 months
+  (live pickup counts only exist inside the platform itself). So
+  `subway_entries_lag1`, `subway_transfers_lag1` and `cta_rides_prevday` are
+  "oracle" features nobody has at forecast time, and `event_attendance` is
+  reported after the game. Keep k = 1 as the core (a platform-side forecaster
+  has live pickups), but run one ablation that lags each feature by its real
+  publication delay (e.g. subway entries from the same hour 2 weeks earlier,
+  CTA from ~90 days earlier) and swaps attendance for the venue's typical
+  attendance. The F1 gap between the two runs measures how much the
+  optimistic features are worth. **Result (2026-10-28, NYC fold 3):** the
+  deployable model (ridership and attendance dropped) scores F1 0.838 on
+  2024 vs 0.858 for the full model and 0.840 for the 4-week average, so it
+  no longer beats the baseline. Subway entries act as a live-activity proxy
+  worth ~2 F1 points. Report both variants. Next idea: replace attendance
+  with each team's / venue's average attendance from earlier games only
+  (skipping 2020-21 zero-attendance games); expected to matter mainly for
+  major-event hours.
 
 ## Repo-level build plan
 

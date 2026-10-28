@@ -7,7 +7,8 @@ above the 90th percentile of scores across the city's zones in that hour (ties a
   avg_4wk:        mean pickups at h-168, h-336, h-504, h-672
 Scored on the fold's early_stop and calibrate splits only; test stays untouched until evaluate.py.
 Metrics: average precision (AUC-PR) and top-decile precision / recall / F1, overall and for
-normal vs extreme hours. Results: data/results/{city}_{fold}_baselines.csv
+normal vs extreme hours. Results: data/results/{city}_{fold}_baselines.csv, and the per-row
+scores and calls in data/processed_ml/{city}_{fold}_baseline_pred.parquet (for evaluate.py).
 train.py imports top_decile_call and report from here, so the model is scored the same way.
 
 Usage: python scripts/baseline.py [--city nyc chicago] [--fold fold3 ...]
@@ -63,12 +64,14 @@ def baselines(con, city, fold):
                     + lag(pickups, 672) OVER w) / 4.0 AS avg_4wk
             FROM read_parquet('{src}') WINDOW w AS (PARTITION BY zone ORDER BY hour))
         SELECT * FROM s WHERE split IN {SCORED_SPLITS} ORDER BY hour, zone""").df()
-    rows = []
+    rows, preds = [], []
     for model, col in (("seasonal_naive", "pickup_lag168"), ("avg_4wk", "avg_4wk")):
         d = df.assign(score=df[col].astype(float).fillna(-1.0))  # no history yet -> lowest score
         d["call"] = top_decile_call(con, d)
         for split in SCORED_SPLITS:
             rows += report(d[d["split"] == split], model, split)
+        preds.append(d[["zone", "hour", "split", "score", "call"]].assign(model=model))
+    pd.concat(preds).to_parquet(PROC_ML / f"{city}_{fold}_baseline_pred.parquet", compression="zstd", index=False)
     out = RESULTS / f"{city}_{fold}_baselines.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     res = pd.DataFrame(rows)

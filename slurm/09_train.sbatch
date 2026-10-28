@@ -15,3 +15,4 @@ python scripts/features.py
 python scripts/sample.py "$@"
 python scripts/baseline.py "$@"
 python scripts/train.py "$@"
+python scripts/evaluate.py "$@"

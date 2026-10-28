@@ -163,14 +163,18 @@ def events_table(con, city):
 def transit_table_nyc(con):
     # Routine subway schedule-change alerts touch several routes every hour (median is 4
     # routes affected) -- the plan's original ">= 3 routes" default was checked against the
-    # actual distribution and was far too lenient (68% of hours). >= 10 routes is the ~95th
-    # percentile; >= 3 suspension updates is the ~99th. Both calibrated from the real data,
-    # not assumed.
+    # actual distribution and was far too lenient (68% of hours). The next rule, ">= 3
+    # suspension updates OR >= 10 routes affected", still fired in 8.3% of hours (9.9% of the
+    # 2024 calibrate year), mostly through the routes condition, and that condition is not
+    # comparable over time: MTA's alert system changed in 2020-04 and the newer alerts list
+    # more routes, so ">= 10 routes" swings from 0.8% of hours (2019) to 14.1% (2020).
+    # Suspension updates alone at >= 3 (~98.5th percentile) flag 2.3% of hours, in line with
+    # severe weather (~2%). 2019 is still lower (0.6%): the 2012-2020 archive's labels were
+    # coarser. See README Week 3.
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE transit_hourly AS
         SELECT hour,
-               (coalesce(sum(n_suspension_updates), 0) >= 3
-                OR coalesce(sum(n_routes_affected), 0) >= 10) AS transit_disruption_flag
+               coalesce(sum(n_suspension_updates), 0) >= 3 AS transit_disruption_flag
         FROM read_parquet('{EXPORT}/mta_alerts_hour.parquet')
         WHERE agency = '{NYC_SUBWAY_AGENCY}'
         GROUP BY hour""")

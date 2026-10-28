@@ -12,10 +12,15 @@ which may reach the model. Calendar features are derived from `hour` (known in a
 `event_flag` is an input despite its name: it comes from event schedules, unlike the extreme
 component flags.
 
-Outputs: data/models/{city}_{fold}.txt, data/processed_ml/{city}_{fold}_pred.parquet
-(zone, hour, split, hotspot, score, call, flags), data/results/{city}_{fold}_model.csv and
-{city}_{fold}_importance.csv.
-Usage: python scripts/train.py [--city nyc] [--fold fold3] [--param num_leaves=127 ...]
+Variants: `full` uses every whitelisted input. `deployable` drops the inputs nobody has at forecast
+time: MTA/CTA ridership (published ~2 weeks / ~3 months late) and event attendance (reported after
+the game). Pickup lags stay (platform-side forecaster); event_flag stays (schedules).
+
+Outputs (suffix `_deployable` for that variant): data/models/{city}_{fold}.txt,
+data/processed_ml/{city}_{fold}_pred.parquet (zone, hour, split, hotspot, score, call, flags),
+data/results/{city}_{fold}_model.csv and {city}_{fold}_importance.csv.
+Usage: python scripts/train.py [--city nyc] [--fold fold3] [--variant full|deployable]
+                               [--param num_leaves=127 ...]
 """
 import argparse
 import os
@@ -40,6 +45,7 @@ TABLE_FEATURES = ["pickup_lag1", "pickup_lag24", "pickup_lag168", "pickup_roll24
                   "wx_temp_f_lag1", "wx_wind_kt_lag1", "wx_vis_mi_lag1", "nws_warning_active_lag1",
                   "event_flag", "event_attendance", "flight_sched_count", "flight_delay_rate_lag1"]
 CITY_FEATURES = {"nyc": ["subway_entries_lag1", "subway_transfers_lag1"], "chicago": ["cta_rides_prevday"]}
+NOT_AVAILABLE_LIVE = {"subway_entries_lag1", "subway_transfers_lag1", "cta_rides_prevday", "event_attendance"}
 FLAGS = ["extreme_flag", "severe_weather_flag", "nws_warning_flag", "major_event_flag",
          "transit_disruption_flag", "flight_delay_flag"]
 PARAMS = dict(objective="binary", metric=["binary_logloss", "average_precision"], learning_rate=0.05,
@@ -56,8 +62,13 @@ def add_calendar(df, city):
                      is_weekend=h.dt.day_of_week >= 5, is_holiday=h.dt.date.isin(set(hol)))
 
 
-def matrix(df, city):
-    X = df[["zone", *CALENDAR, *TABLE_FEATURES, *CITY_FEATURES[city]]].copy()
+def inputs(city, variant):
+    cols = ["zone", *CALENDAR, *TABLE_FEATURES, *CITY_FEATURES[city]]
+    return [c for c in cols if not (variant == "deployable" and c in NOT_AVAILABLE_LIVE)]
+
+
+def matrix(df, city, variant):
+    X = df[inputs(city, variant)].copy()
     X["zone"] = pd.Categorical(X["zone"], categories=range(1, N_ZONES[city] + 1))
     for c in X.columns.drop("zone"):
         X[c] = X[c].astype("float32")
@@ -74,34 +85,36 @@ def load(con, city, fold):
     return add_calendar(train, city), add_calendar(held, city)
 
 
-def train(con, city, fold, overrides):
+def train(con, city, fold, variant, overrides):
     t0 = time.time()
+    tag = f"{city}_{fold}" + ("" if variant == "full" else f"_{variant}")
     train_df, held = load(con, city, fold)
     es = held[held["split"] == "early_stop"]
-    dtrain = lgb.Dataset(matrix(train_df, city), train_df["hotspot"], weight=train_df["weight"])
-    dvalid = lgb.Dataset(matrix(es, city), es["hotspot"], reference=dtrain)
+    dtrain = lgb.Dataset(matrix(train_df, city, variant), train_df["hotspot"], weight=train_df["weight"])
+    dvalid = lgb.Dataset(matrix(es, city, variant), es["hotspot"], reference=dtrain)
     booster = lgb.train({**PARAMS, **overrides}, dtrain, MAX_ROUNDS, valid_sets=[dvalid], valid_names=["early_stop"],
                         callbacks=[lgb.early_stopping(EARLY_STOP_ROUNDS, first_metric_only=True),
                                    lgb.log_evaluation(100)])
     fit_s = time.time() - t0
 
-    held["score"] = booster.predict(matrix(held, city), num_iteration=booster.best_iteration)
+    held["score"] = booster.predict(matrix(held, city, variant), num_iteration=booster.best_iteration)
     held["call"] = top_decile_call(con, held)
-    rows = [r for split in ("early_stop", "calibrate") for r in report(held[held["split"] == split], "lightgbm", split)]
+    model_name = "lightgbm" if variant == "full" else f"lightgbm_{variant}"
+    rows = [r for split in ("early_stop", "calibrate") for r in report(held[held["split"] == split], model_name, split)]
     res = pd.DataFrame(rows).assign(best_iteration=booster.best_iteration, fit_seconds=round(fit_s),
-                                    train_rows=len(train_df), params=str(overrides or "default"))
+                                    train_rows=len(train_df), variant=variant, params=str(overrides or "default"))
 
     MODELS.mkdir(parents=True, exist_ok=True)
-    booster.save_model(str(MODELS / f"{city}_{fold}.txt"))
+    booster.save_model(str(MODELS / f"{tag}.txt"))
     held[["zone", "hour", "split", "hotspot", "score", "call", *FLAGS]].to_parquet(
-        PROC_ML / f"{city}_{fold}_pred.parquet", compression="zstd", index=False)
-    res.to_csv(RESULTS / f"{city}_{fold}_model.csv", index=False)
+        PROC_ML / f"{tag}_pred.parquet", compression="zstd", index=False)
+    res.to_csv(RESULTS / f"{tag}_model.csv", index=False)
     imp = pd.DataFrame({"feature": booster.feature_name(), "gain": booster.feature_importance("gain")})
-    imp.sort_values("gain", ascending=False).to_csv(RESULTS / f"{city}_{fold}_importance.csv", index=False)
+    imp.sort_values("gain", ascending=False).to_csv(RESULTS / f"{tag}_importance.csv", index=False)
 
     base = pd.read_csv(RESULTS / f"{city}_{fold}_baselines.csv")
     table = pd.concat([base, res[base.columns]])
-    print(f"{city} {fold}: {len(train_df):,} train rows, best iteration {booster.best_iteration}, "
+    print(f"{tag}: {len(train_df):,} train rows, best iteration {booster.best_iteration}, "
           f"fit {fit_s / 60:.1f} min\n"
           + table[table["subset"] == "all"].round(3).to_string(index=False)
           + "\ntop features by gain:\n" + imp.nlargest(10, "gain").to_string(index=False), flush=True)
@@ -111,6 +124,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--city", nargs="+", default=["nyc"])
     ap.add_argument("--fold", nargs="+", default=["fold3"])
+    ap.add_argument("--variant", default="full", choices=["full", "deployable"])
     ap.add_argument("--param", nargs="*", default=[], help="LightGBM overrides, e.g. num_leaves=127")
     a = ap.parse_args()
     overrides = {k: type(PARAMS[k])(v) if k in PARAMS else float(v)
@@ -118,7 +132,7 @@ def main():
     con = duckdb.connect()
     for city in a.city:
         for fold in a.fold:
-            train(con, city, fold, overrides)
+            train(con, city, fold, a.variant, overrides)
 
 
 if __name__ == "__main__":

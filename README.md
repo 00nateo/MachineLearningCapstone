@@ -90,22 +90,23 @@ aggregation to zone-hour panels, and export to the HF dataset
   | Model | Hours | Precision | Recall | F1 | AUC-PR |
   |---|---|---|---|---|---|
   | Seasonal naive (same hour last week) | all | 0.812 | 0.812 | 0.812 | 0.671 |
-  | | normal | 0.810 | 0.810 | 0.810 | 0.659 |
-  | | extreme | 0.826 | 0.820 | 0.823 | 0.754 |
+  | | normal | 0.811 | 0.812 | 0.811 | 0.667 |
+  | | extreme | 0.823 | 0.807 | 0.815 | 0.744 |
   | 4-week same-hour average | all | 0.838 | 0.842 | 0.840 | 0.695 |
-  | | normal | 0.836 | 0.841 | 0.839 | 0.682 |
-  | | extreme | 0.852 | 0.850 | 0.851 | 0.782 |
-  | **LightGBM** | all | **0.854** | **0.861** | **0.857** | **0.940** |
-  | | normal | 0.852 | 0.859 | 0.856 | 0.939 |
-  | | extreme | 0.869 | 0.873 | 0.871 | 0.951 |
+  | | normal | 0.837 | 0.843 | 0.840 | 0.691 |
+  | | extreme | 0.847 | 0.836 | 0.841 | 0.767 |
+  | **LightGBM** | all | **0.855** | **0.861** | **0.858** | **0.940** |
+  | | normal | 0.854 | 0.861 | 0.857 | 0.940 |
+  | | extreme | 0.864 | 0.867 | 0.865 | 0.947 |
 
   Precision ≈ recall by construction: the model calls exactly the top 10% of
-  zones each hour, and ~10% of zone-hours are true hotspots.
+  zones each hour, and ~10% of zone-hours are true hotspots. (Numbers are
+  after the transit-flag fix below; extreme = 5.2% of calibrate zone-hours.)
 
-  On the early-stop year (2023) LightGBM's F1 is 0.870, so it drops ~1.3
+  On the early-stop year (2023) LightGBM's F1 is 0.869, so it drops ~1.1
   points one year further out: a first, mild sign of drift.
-- Run: 5.10M training rows, best iteration 2,641 of 3,000, fit 7.1 min,
-  whole job 9 min on 32 cores.
+- Run: 4.83M training rows, best iteration 2,250 of 3,000, fit 6.1 min,
+  whole job 8 min on 32 cores.
 
 Decisions:
 - **Day sampling is zone-day, not city-day.** A zone's rows are always kept on
@@ -130,18 +131,20 @@ Decisions:
   LightGBM uses seed 42 with `deterministic=True`.
 
 Edge cases and observations for the write-up:
-- **Sampling kept 86% of training rows, not ~65%.** Citywide extremes
+- **Sampling kept 81% of training rows, not ~65%.** Citywide extremes
   (weather, NWS, subway) mark every zone on those days, so whole days are
-  kept. 8.0% of kept rows are extreme.
-- **The best iteration is close to the 3,000-round cap.** Raise the cap or the
-  learning rate when tuning.
+  kept. 6.1% of kept rows are extreme. (86% / 8.0% before the transit-flag
+  fix.)
+- **The best iteration is close to the 3,000-round cap** (2,250 now, 2,641
+  before the fix). Raise the cap or the learning rate when tuning.
 - **AUC-PR understates the baselines.** Their scores are raw counts with many
   ties, which average precision penalizes. Top-decile F1 is the fairer
-  comparison (0.840 vs 0.857).
-- **Extreme hours score better than normal hours (F1 0.871 vs 0.856).** The
-  composite is dominated by zone-level flags at zones that are nearly always
-  hotspots (MSG during events, the airports). So the composite alone can make
-  the model look robust; evaluation must break results down per component.
+  comparison (0.840 vs 0.858).
+- **Extreme hours still score slightly better than normal hours (F1 0.865 vs
+  0.857).** The composite mixes conditions of very different difficulty
+  (flight-delay zones are trivially hot; major events are hard), so the
+  composite alone can make the model look robust. Evaluation must break
+  results down per component (see below).
 - **The model is almost entirely autoregressive.** Zone plus demand lags and
   rolling means carry ~87% of the gain; weather, NWS, flights and events
   together < 2%; subway ~2.6%. Under shift, conditions barely move its
@@ -149,6 +152,84 @@ Edge cases and observations for the write-up:
 - **Subway features are NULL before 2020-07**, inside the training years.
   LightGBM handles the NaNs, but the feature's availability itself shifts
   over time.
+
+**Modeling — Week 3 evaluation (`evaluate.py`, NYC fold 3, calibrate year):**
+
+Metrics added, and why each one:
+- **Day-block bootstrap 95% intervals** (1,000 resamples of whole days) for
+  precision / recall / F1 and for the paired model-minus-baseline F1 gap. A
+  point estimate can't show the gain is real; whole days are resampled
+  because zone-hours within a day are strongly correlated.
+- **Brier score and a reliability table.** The conformal layer is built on
+  these probabilities, and training up-weights extreme rows 3x.
+- **Per-condition breakdown with counts** (each component flag on its own).
+  The composite flag made extreme hours look easier.
+- **Month-by-month F1:** a simple drift curve across the year.
+- Left out on purpose: plain accuracy (90% by calling nothing a hotspot),
+  ROC-AUC (flattering at 10% prevalence), MCC (redundant since precision ≈
+  recall ≈ F1).
+
+Decision: **NYC transit flag tightened to ">= 3 subway suspension updates in
+the hour"** (was ">= 3 suspension updates OR >= 10 routes affected"). The old
+rule fired in 8.3% of hours (9.9% of the 2024 calibrate year), mostly through
+the routes condition, which isn't extreme and isn't comparable over time:
+MTA's alert system changed in 2020-04 and the newer alerts list more routes,
+so ">= 10 routes" swings from 0.8% of hours in 2019 to 14.1% in 2020. The new
+rule flags 2.3% of hours (~98.5th percentile), in line with severe weather.
+Composite `extreme_flag` for NYC: 10.9% -> **5.1%** of hours (Chicago
+unchanged at 8.4%; it uses the CTA anomaly). Edge case: 2019 still flags
+less (0.6% of hours) because the 2012-2020 alert archive's labels were
+coarser.
+
+Results (after the transit fix):
+- **The gain is real.** LightGBM F1 0.858 (95% interval 0.855-0.860). Gap over
+  the 4-week average +1.8 points (1.4-2.2); over seasonal naive +4.6
+  (4.1-5.1).
+- **Overconfident in the middle range.** Brier 0.022, ECE 0.012 (small
+  because most predictions sit near 0 or 1). But where the model says ~55%,
+  hotspots happen 41% of the time; at ~85%, 72%. Likely causes: the 3x
+  extreme weighting and drift from 2023 to 2024. Conformal calibration
+  should absorb this, but report it.
+- **By condition (calibrate year):**
+
+  | Condition | LightGBM F1 | 4-week avg F1 | Share of zone-hours | Hotspot rate |
+  |---|---|---|---|---|
+  | Normal | 0.857 | 0.840 | 94.8% | 10.1% |
+  | Transit disruption | 0.868 | 0.854 | 2.9% | 10.2% |
+  | Severe weather | 0.846 | 0.803 | 1.8% | 10.2% |
+  | NWS warning | 0.853 | 0.826 | 0.6% | 10.2% |
+  | Major event | 0.809 | 0.746 | 0.1% | 33.8% |
+  | Flight delays | 0.988 | 0.987 | 0.1% | 56.1% |
+
+  Major events and severe weather are the genuinely hard conditions, and
+  where LightGBM beats the baseline most (+6.3 and +4.3 points).
+- **Drift within the year:** monthly F1 slides from ~0.865 (spring 2024) to
+  0.840 (December). The 4-week average beats LightGBM in August and October,
+  so the model's edge is not uniform.
+
+**Deployable ablation** (`train.py --variant deployable`): drop the inputs
+nobody has at forecast time — subway entries/transfers (MTA publishes ~2 weeks
+late), CTA rides (~3 months late) and event attendance (reported after the
+game). Same sample and settings.
+
+| Model | F1, 2023 (early stop) | F1, 2024 (calibrate) | AUC-PR, 2024 |
+|---|---|---|---|
+| LightGBM, full | 0.869 | **0.858** | 0.940 |
+| LightGBM, deployable | 0.859 | 0.838 | 0.927 |
+| 4-week average | 0.841 | 0.840 | 0.695 |
+
+- **Without the oracle ridership features, LightGBM no longer beats the
+  4-week average on 2024 (F1 0.838 vs 0.840)**, though it still does on 2023
+  and on extreme hours (0.848 vs 0.841; normal hours 0.837 vs 0.840).
+- Subway entries at h-1 carry only ~2.6% of the full model's gain, yet are
+  worth ~2 F1 points: they act as a live proxy for how busy a zone is right
+  now. That signal isn't available to a real forecaster.
+- The deployable model also drifts twice as fast (-2.1 points 2023 -> 2024 vs
+  -1.1 for the full model).
+- Implication for the write-up: "beats the baseline" depends on the
+  deployment assumption. Report both variants. A deployable live-activity
+  signal (e.g. the platform's own live request counts) is what would close
+  the gap. Not yet in `evaluate.py` (no intervals for the deployable model).
 
 **Next (Week 4)**: a simple abstention rule (one global threshold), the
 normal vs extreme subgroup table, and the milestone report. Chicago fold 3
