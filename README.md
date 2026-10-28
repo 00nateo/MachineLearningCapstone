@@ -84,11 +84,23 @@ aggregation to zone-hour panels, and export to the HF dataset
   --fold fold3` (re-runs `features.py` first).
 - Results on the calibrate year (2024), 2.31M zone-hours, 10.2% hotspots:
 
-  | Model | AUC-PR | Top-decile F1 (all) | F1, normal hours | F1, extreme hours |
-  |---|---|---|---|---|
-  | Seasonal naive (same hour last week) | 0.671 | 0.812 | 0.810 | 0.823 |
-  | 4-week same-hour average | 0.695 | 0.840 | 0.839 | 0.851 |
-  | LightGBM | **0.940** | **0.857** | **0.856** | **0.871** |
+  Precision / recall / F1 are for the top-decile hotspot call; normal and
+  extreme hours are split by `extreme_flag`.
+
+  | Model | Hours | Precision | Recall | F1 | AUC-PR |
+  |---|---|---|---|---|---|
+  | Seasonal naive (same hour last week) | all | 0.812 | 0.812 | 0.812 | 0.671 |
+  | | normal | 0.810 | 0.810 | 0.810 | 0.659 |
+  | | extreme | 0.826 | 0.820 | 0.823 | 0.754 |
+  | 4-week same-hour average | all | 0.838 | 0.842 | 0.840 | 0.695 |
+  | | normal | 0.836 | 0.841 | 0.839 | 0.682 |
+  | | extreme | 0.852 | 0.850 | 0.851 | 0.782 |
+  | **LightGBM** | all | **0.854** | **0.861** | **0.857** | **0.940** |
+  | | normal | 0.852 | 0.859 | 0.856 | 0.939 |
+  | | extreme | 0.869 | 0.873 | 0.871 | 0.951 |
+
+  Precision ≈ recall by construction: the model calls exactly the top 10% of
+  zones each hour, and ~10% of zone-hours are true hotspots.
 
   On the early-stop year (2023) LightGBM's F1 is 0.870, so it drops ~1.3
   points one year further out: a first, mild sign of drift.
