@@ -77,7 +77,68 @@ aggregation to zone-hour panels, and export to the HF dataset
   events, flight delays and Chicago's CTA anomaly are zone-level. A snowstorm
   flags all 263 NYC zones; a Knicks game flags only MSG's zone.
 
-**Next**: baselines (seasonal-last-week, 4-week average) and a first
-LightGBM model on NYC fold 3 — the milestone's required preliminary result.
-See `MODELING_PLAN.md` for the full plan, fold definitions, and threshold
-justifications.
+**Modeling — Week 3 (baselines + first model, NYC fold 3, done 2026-10-28):**
+- Scripts: `sample.py` (training-day sampling and weights), `baseline.py`
+  (both baselines plus the shared scoring code), `train.py` (LightGBM), run
+  together by `sbatch --account=$ACCOUNT slurm/09_train.sbatch --city nyc
+  --fold fold3` (re-runs `features.py` first).
+- Results on the calibrate year (2024), 2.31M zone-hours, 10.2% hotspots:
+
+  | Model | AUC-PR | Top-decile F1 (all) | F1, normal hours | F1, extreme hours |
+  |---|---|---|---|---|
+  | Seasonal naive (same hour last week) | 0.671 | 0.812 | 0.810 | 0.823 |
+  | 4-week same-hour average | 0.695 | 0.840 | 0.839 | 0.851 |
+  | LightGBM | **0.940** | **0.857** | **0.856** | **0.871** |
+
+  On the early-stop year (2023) LightGBM's F1 is 0.870, so it drops ~1.3
+  points one year further out: a first, mild sign of drift.
+- Run: 5.10M training rows, best iteration 2,641 of 3,000, fit 7.1 min,
+  whole job 9 min on 32 cores.
+
+Decisions:
+- **Day sampling is zone-day, not city-day.** A zone's rows are always kept on
+  a day it had any extreme hour. A city-day rule would keep nearly every day,
+  because major events and flight delays fire in some zone almost daily.
+- **Model inputs are an explicit whitelist.** The feature table also holds
+  same-hour columns (`pickups`, `dropoffs`, `median_*`), the label, fold tags
+  and the extreme flags; any of them would leak. `event_flag` is an input
+  despite its name, because it comes from schedules.
+- **Calendar features are derived from `hour`** (hour of day, weekday, month,
+  weekend, US + state holiday). They're known in advance and weren't in the
+  feature table.
+- **Early stopping on log loss**, not AUC-PR, because the conformal layer
+  needs reasonable probabilities.
+- **Hotspot call = top decile of scores per hour**, the same quantile rule as
+  the label. Calls and true hotspots are about the same count, so precision ≈
+  recall by construction.
+- **Test is predicted but not scored yet.** Predictions are saved in
+  `data/processed_ml/nyc_fold3_pred.parquet` for the conformal and
+  evaluation steps.
+- **Reproducible:** the sampled days come from md5(date || seed), and
+  LightGBM uses seed 42 with `deterministic=True`.
+
+Edge cases and observations for the write-up:
+- **Sampling kept 86% of training rows, not ~65%.** Citywide extremes
+  (weather, NWS, subway) mark every zone on those days, so whole days are
+  kept. 8.0% of kept rows are extreme.
+- **The best iteration is close to the 3,000-round cap.** Raise the cap or the
+  learning rate when tuning.
+- **AUC-PR understates the baselines.** Their scores are raw counts with many
+  ties, which average precision penalizes. Top-decile F1 is the fairer
+  comparison (0.840 vs 0.857).
+- **Extreme hours score better than normal hours (F1 0.871 vs 0.856).** The
+  composite is dominated by zone-level flags at zones that are nearly always
+  hotspots (MSG during events, the airports). So the composite alone can make
+  the model look robust; evaluation must break results down per component.
+- **The model is almost entirely autoregressive.** Zone plus demand lags and
+  rolling means carry ~87% of the gain; weather, NWS, flights and events
+  together < 2%; subway ~2.6%. Under shift, conditions barely move its
+  predictions, so the abstention layer has to carry the reliability story.
+- **Subway features are NULL before 2020-07**, inside the training years.
+  LightGBM handles the NaNs, but the feature's availability itself shifts
+  over time.
+
+**Next (Week 4)**: a simple abstention rule (one global threshold), the
+normal vs extreme subgroup table, and the milestone report. Chicago fold 3
+runs with the same command and `--city chicago`. See `MODELING_PLAN.md` for
+the full plan, fold definitions, and threshold justifications.

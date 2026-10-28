@@ -260,11 +260,11 @@ New scripts under `scripts/`, following the existing `export.py` /
 - `features.py` **(done)** — lag/rolling features computed on the full
   series, plus weather/NWS/event/transit/flight joins and the composite
   extreme flag. Outputs one feature table per city.
-- `sample.py` **(pending)** — applies the stratified day-sampling/weighting
+- `sample.py` **(done)** — applies the stratified day-sampling/weighting
   rule to the train split only.
-- `baseline.py` **(pending)** — seasonal-last-week and 4-week-average
+- `baseline.py` **(done)** — seasonal-last-week and 4-week-average
   baselines, ranked to top decile.
-- `train.py` **(pending)** — LightGBM per city per fold, early-stopped,
+- `train.py` **(done)** — LightGBM per city per fold, early-stopped,
   fixed seeds, scored on AUC-PR and top-decile precision/recall.
 - `conformal.py` **(pending)** — Mondrian conformal layer: fit on calibrate,
   sweep alpha 0.01-0.20, track singleton/full/empty prediction sets
@@ -293,9 +293,10 @@ Interpretation; Completion Plan/Record/Contributions/Writing.
   disruption, NWS phenomena, flight delay rate — see Extreme-condition flags
   above for the numbers). Final `extreme_flag` rate: 11.9% NYC, 9.8% Chicago;
   10.9% / 8.4% after the 2026-10-28 NWS timezone + county-filter fixes.
-- **Week 3 — NEXT. Baselines + first model.** `baseline.py` (both baselines) +
-  `train.py` on NYC fold 3, scored on calibrate. This is the required
-  preliminary result.
+- **Week 3 — DONE. Baselines + first model.** `sample.py`, `baseline.py`
+  (both baselines) + `train.py` on NYC fold 3, scored on calibrate. LightGBM
+  top-decile F1 0.857 vs 0.840 (4-week average) and 0.812 (seasonal naive);
+  AUC-PR 0.940. Details, decisions and edge cases in README.md (Week 3).
 - **Week 4 — Simple abstention + one subgroup + write the milestone
   report.** A single global-threshold abstain rule (full Mondrian comes
   later) and one subgroup table (normal vs. "any extreme"). In parallel,
