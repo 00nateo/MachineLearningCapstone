@@ -14,7 +14,8 @@ component flags.
 
 Variants: `full` uses every whitelisted input. `deployable` drops the inputs nobody has at forecast
 time: MTA/CTA ridership (published ~2 weeks / ~3 months late) and event attendance (reported after
-the game). Pickup lags stay (platform-side forecaster); event_flag stays (schedules).
+the game), and adds expected_attendance (average attendance of the same team's / venue's earlier
+events, known in advance). Pickup lags stay (platform-side forecaster); event_flag stays (schedules).
 
 Outputs (suffix `_deployable` for that variant): data/models/{city}_{fold}.txt,
 data/processed_ml/{city}_{fold}_pred.parquet (zone, hour, split, hotspot, score, call, flags),
@@ -46,6 +47,7 @@ TABLE_FEATURES = ["pickup_lag1", "pickup_lag24", "pickup_lag168", "pickup_roll24
                   "event_flag", "event_attendance", "flight_sched_count", "flight_delay_rate_lag1"]
 CITY_FEATURES = {"nyc": ["subway_entries_lag1", "subway_transfers_lag1"], "chicago": ["cta_rides_prevday"]}
 NOT_AVAILABLE_LIVE = {"subway_entries_lag1", "subway_transfers_lag1", "cta_rides_prevday", "event_attendance"}
+DEPLOYABLE_ONLY = ["expected_attendance"]  # stand-in for event_attendance in the deployable variant
 FLAGS = ["extreme_flag", "severe_weather_flag", "nws_warning_flag", "major_event_flag",
          "transit_disruption_flag", "flight_delay_flag"]
 PARAMS = dict(objective="binary", metric=["binary_logloss", "average_precision"], learning_rate=0.05,
@@ -64,7 +66,9 @@ def add_calendar(df, city):
 
 def inputs(city, variant):
     cols = ["zone", *CALENDAR, *TABLE_FEATURES, *CITY_FEATURES[city]]
-    return [c for c in cols if not (variant == "deployable" and c in NOT_AVAILABLE_LIVE)]
+    if variant == "full":
+        return cols
+    return [c for c in cols if c not in NOT_AVAILABLE_LIVE] + DEPLOYABLE_ONLY
 
 
 def matrix(df, city, variant):
@@ -77,7 +81,7 @@ def matrix(df, city, variant):
 
 def load(con, city, fold):
     # Numeric features come back as DOUBLE so booleans with gaps (NULL) become NaN for LightGBM.
-    feats = ", ".join(f"{c}::DOUBLE AS {c}" for c in TABLE_FEATURES + CITY_FEATURES[city])
+    feats = ", ".join(f"{c}::DOUBLE AS {c}" for c in TABLE_FEATURES + CITY_FEATURES[city] + DEPLOYABLE_ONLY)
     keep = f"zone, hour, hotspot, {feats}, {', '.join(FLAGS)}"
     train = con.execute(f"SELECT {keep}, weight FROM read_parquet('{PROC_ML / f'{city}_{fold}_train.parquet'}')").df()
     held = con.execute(f"""SELECT {keep}, {fold} AS split FROM read_parquet('{PROC_ML / f'{city}_features.parquet'}')

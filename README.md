@@ -231,7 +231,87 @@ game). Same sample and settings.
   signal (e.g. the platform's own live request counts) is what would close
   the gap. Not yet in `evaluate.py` (no intervals for the deployable model).
 
-**Next (Week 4)**: a simple abstention rule (one global threshold), the
-normal vs extreme subgroup table, and the milestone report. Chicago fold 3
-runs with the same command and `--city chicago`. See `MODELING_PLAN.md` for
+**Expected attendance (deployable variant, 2026-10-28):** the deployable model
+swapped actual attendance (reported after the game) for `expected_attendance`:
+the average attendance of the same home team's earlier games (or the venue's,
+for concerts / neutral sites), over calendar days strictly before the event,
+skipping zero-attendance 2020-21 games. Result: no real change (F1 0.838 ->
+0.837 overall, 0.799 -> 0.801 on major-event hours; every condition within
+±0.002), and it isn't among the top 10 features. Crowd size isn't what the
+model is missing on event hours; the scheduled `event_flag` already carries
+that an event is on. The errors are more likely about *when and where* people
+leave. Edge case: concerts and US Open matches have no attendance in the
+sources, so their expected attendance is always NULL.
+
+**Modeling — Week 4 (simple abstention rule, NYC fold 3, 2026-10-28):**
+- Script: `scripts/conformal.py --mode global` (reads the saved predictions,
+  runs in seconds).
+- Method: split conformal with one global threshold. Calibration score
+  s = 1 - p(true class); q = the ceil((n+1)(1-alpha))-th smallest score. A row
+  with hotspot probability p gets {hotspot} if p >= 1-q and {not} if p <= q;
+  exactly one -> confident call, both or neither -> abstain.
+
+Decisions:
+- **Test stays untouched.** Thresholds are fit on the first half of the
+  calibrate year (Jan-Jun 2024, 1.15M rows) and evaluated on the second half
+  (Jul-Dec 2024, 1.16M rows). The second half also carries the within-year
+  drift seen in Week 3, so it doubles as a small shift test.
+- **One global threshold first** (as planned); the Mondrian version with
+  separate thresholds per class x condition is Week 5.
+- **Full model is the headline; deployable is reported alongside.**
+
+Results, full model, Jul-Dec 2024:
+
+| alpha | Target coverage | Coverage | Hotspot coverage | Abstain (empty / full) | Accuracy when confident | Confident-miss rate |
+|---|---|---|---|---|---|---|
+| 0.01 | 0.99 | 0.990 | 0.958 | 6.3% (0 / 6.3%) | 0.989 | 4.2% |
+| 0.02 | 0.98 | 0.980 | 0.916 | 2.6% (0 / 2.6%) | 0.979 | 8.4% |
+| 0.05 | 0.95 | 0.947 | 0.794 | 3.6% (3.6% / 0) | 0.982 | 7.0% |
+| 0.10 | 0.90 | 0.895 | 0.638 | 10.0% (10.0% / 0) | 0.995 | 2.0% |
+| 0.15 | 0.85 | 0.844 | 0.503 | 15.5% (15.5% / 0) | 0.999 | 0.6% |
+| 0.20 | 0.80 | 0.792 | 0.384 | 20.7% (20.7% / 0) | 1.000 | 0.2% |
+
+(Confident-miss rate = share of true hotspots confidently called "not".)
+
+By condition at alpha = 0.05:
+
+| Condition | Coverage | Hotspot coverage | Abstain | Accuracy when confident | Confident-miss rate |
+|---|---|---|---|---|---|
+| Normal | 0.947 | 0.793 | 3.6% | 0.982 | 7.1% |
+| Extreme (any) | 0.942 | 0.820 | 3.9% | 0.981 | 6.0% |
+| Severe weather | 0.944 | 0.789 | 3.8% | 0.981 | 6.7% |
+| NWS warning | 0.948 | 0.884 | 3.3% | 0.980 | 4.8% |
+| Transit disruption | 0.949 | 0.814 | 3.5% | 0.984 | 6.0% |
+| **Major event** | **0.753** | 0.774 | **15.2%** | **0.888** | **10.2%** |
+| Flight delays | 0.988 | 0.987 | 0.9% | 0.997 | 0.4% |
+
+Findings and edge cases for the write-up:
+- **Overall coverage roughly holds but runs slightly under target** on the
+  second half of 2024 (0.947 vs 0.95, 0.895 vs 0.90, 0.792 vs 0.80): the
+  within-year drift already erodes the guarantee a little.
+- **The hotspot class is badly under-covered:** 0.79 at alpha = 0.05 and only
+  0.38 at alpha = 0.20. A single threshold is set mostly by the 90% "not" rows,
+  so it protects the majority class. This is the case for Week 5's
+  class-conditional (Mondrian) thresholds.
+- **The kind of abstention flips with alpha.** For alpha <= 0.02, q >= 0.5 and
+  abstentions are full sets (both answers plausible); for alpha >= 0.05,
+  q < 0.5 and they're empty sets (neither plausible enough). That's why the
+  confident-miss rate isn't monotone in alpha (8.4% at 0.02, 7.0% at 0.05,
+  2.0% at 0.10): with empty sets, mid-probability hotspots get abstained on
+  instead of confidently called "not".
+- **The guarantee breaks on major events:** coverage 0.75 against a promised
+  0.95, abstention 4x the normal rate (15.2%), accuracy when confident 0.89
+  and 10% of true hotspots confidently missed. The model does abstain more
+  there, but not on most cases, so the failure criterion isn't triggered at
+  this alpha. These are the hours conditional thresholds need to fix.
+- **Flight-delay hours are trivially easy** (airport zones are nearly always
+  hotspots), so they shouldn't be read as "robust under disruption".
+- **Deployable model** (no ridership): same coverage overall (0.946) but
+  hotspot coverage 0.72 and confident-miss rate 12.2% at alpha = 0.05 (vs 0.79
+  and 7.0%). A weaker model shows up as more confident misses at the same
+  abstention rate.
+
+**Next**: the milestone report (Week 4), then the Mondrian version with
+thresholds per class x condition and the alpha sweep (Week 5). Chicago fold 3
+runs with the same commands and `--city chicago`. See `MODELING_PLAN.md` for
 the full plan, fold definitions, and threshold justifications.

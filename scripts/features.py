@@ -133,24 +133,42 @@ def nws_table(con, city):
 def events_table(con, city):
     # events.city / event_venues.city hold the venue's actual municipality (Queens, Newark, ...),
     # not the metro -- `metro` is the column that actually takes 'nyc' / 'chicago' values.
+    #
+    # expected_attendance: what a forecaster could know beforehand, since actual attendance is
+    # reported after the event. Average attendance of earlier events with the same crowd key
+    # (league + home team for games, e.g. "nba | New York Knicks"; league + venue otherwise),
+    # over calendar days strictly before this event's date. Zero-attendance games (no fans,
+    # 2020-21) are skipped. NULL when there's no history (first game, concerts, US Open).
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE events_expected AS
+        WITH e AS (
+            SELECT *, CASE WHEN source = 'espn' AND title LIKE '% at %'
+                           THEN league || ' | ' || split_part(title, ' at ', 2)
+                           ELSE league || ' | ' || venue_name END AS crowd_key
+            FROM read_parquet('{EXPORT}/events.parquet') WHERE metro = '{city}')
+        SELECT *, avg(CASE WHEN attendance > 0 THEN attendance END) OVER (
+                      PARTITION BY crowd_key ORDER BY start_local::DATE
+                      RANGE BETWEEN UNBOUNDED PRECEDING AND INTERVAL 1 DAY PRECEDING) AS expected_attendance
+        FROM e""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE events_attributed AS
-        SELECT zone, start_local, end_local_est::TIMESTAMP AS end_local, attendance
-        FROM read_parquet('{EXPORT}/events.parquet')
-        WHERE metro = '{city}' AND zone IS NOT NULL
+        SELECT zone, start_local, end_local_est::TIMESTAMP AS end_local, attendance, expected_attendance
+        FROM events_expected
+        WHERE zone IS NOT NULL
         UNION ALL
         SELECT unnest(v.entry_zones)::SMALLINT AS zone, e.start_local,
-               e.end_local_est::TIMESTAMP AS end_local, e.attendance
-        FROM read_parquet('{EXPORT}/events.parquet') e
+               e.end_local_est::TIMESTAMP AS end_local, e.attendance, e.expected_attendance
+        FROM events_expected e
         JOIN read_parquet('{EXPORT}/event_venues.parquet') v
             ON v.venue_name = e.venue_name AND v.metro = e.metro
-        WHERE e.metro = '{city}' AND e.zone IS NULL AND v.entry_zones IS NOT NULL""")
+        WHERE e.zone IS NULL AND v.entry_zones IS NOT NULL""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE events_zone_hour AS
         WITH hz AS (SELECT DISTINCT zone, hour FROM lagged)
         SELECT hz.zone, hz.hour,
                count(ev.zone) > 0 AS event_flag,
                coalesce(sum(ev.attendance), 0) AS event_attendance,
+               coalesce(sum(ev.expected_attendance), 0) AS expected_attendance,
                bool_or(coalesce(ev.attendance, 0) >= {MAJOR_EVENT_ATTENDANCE}) AS major_event_flag
         FROM hz
         LEFT JOIN events_attributed ev
@@ -238,7 +256,7 @@ def assemble_nyc(con):
             SELECT l.*,
                    w.wx_temp_f_lag1, w.wx_wind_kt_lag1, w.wx_vis_mi_lag1,
                    n.nws_warning_active_lag1,
-                   e.event_flag, e.event_attendance,
+                   e.event_flag, e.event_attendance, e.expected_attendance,
                    t.subway_entries_lag1, t.subway_transfers_lag1,
                    fl.flight_sched_count, fl.flight_delay_rate_lag1,
                    coalesce(w.severe_weather_flag, false) AS severe_weather_flag,
@@ -270,7 +288,7 @@ def assemble_chicago(con):
             SELECT l.*,
                    w.wx_temp_f_lag1, w.wx_wind_kt_lag1, w.wx_vis_mi_lag1,
                    n.nws_warning_active_lag1,
-                   e.event_flag, e.event_attendance,
+                   e.event_flag, e.event_attendance, e.expected_attendance,
                    t.cta_rides_prevday,
                    fl.flight_sched_count, fl.flight_delay_rate_lag1,
                    coalesce(w.severe_weather_flag, false) AS severe_weather_flag,

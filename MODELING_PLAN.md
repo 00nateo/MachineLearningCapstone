@@ -273,10 +273,11 @@ Add new candidates here with their dates as they come up.
   deployable model (ridership and attendance dropped) scores F1 0.838 on
   2024 vs 0.858 for the full model and 0.840 for the 4-week average, so it
   no longer beats the baseline. Subway entries act as a live-activity proxy
-  worth ~2 F1 points. Report both variants. Next idea: replace attendance
-  with each team's / venue's average attendance from earlier games only
-  (skipping 2020-21 zero-attendance games); expected to matter mainly for
-  major-event hours.
+  worth ~2 F1 points. Report both variants. Tried next: replacing attendance
+  with `expected_attendance` (each team's / venue's average from earlier
+  games only, skipping 2020-21 zero-attendance games) made no difference
+  (F1 0.838 -> 0.837; major-event hours 0.799 -> 0.801). Crowd size isn't
+  what the model misses on event hours.
 
 ## Repo-level build plan
 
@@ -294,10 +295,12 @@ New scripts under `scripts/`, following the existing `export.py` /
   baselines, ranked to top decile.
 - `train.py` **(done)** — LightGBM per city per fold, early-stopped,
   fixed seeds, scored on AUC-PR and top-decile precision/recall.
-- `conformal.py` **(pending)** — Mondrian conformal layer: fit on calibrate,
-  sweep alpha 0.01-0.20, track singleton/full/empty prediction sets
-  separately.
-- `evaluate.py` **(pending)** — accuracy-when-confident, abstention rate,
+- `conformal.py` **(global mode done; Mondrian pending)** — conformal layer:
+  fit on calibrate, sweep alpha 0.01-0.20, track singleton/full/empty
+  prediction sets separately. Week 4's global-threshold version measures on
+  Jul-Dec 2024 with thresholds from Jan-Jun 2024 (test untouched).
+- `evaluate.py` **(partly done: intervals, calibration, per-condition and
+  monthly metrics on calibrate)** — still to add: accuracy-when-confident, abstention rate,
   per-subgroup breakdown, near-hit and drive-time domain metrics,
   calibration-vs-test coverage gap per fold (+ random-week no-shift
   reference).
@@ -327,7 +330,11 @@ Interpretation; Completion Plan/Record/Contributions/Writing.
   AUC-PR 0.940. Details, decisions and edge cases in README.md (Week 3).
 - **Week 4 — Simple abstention + one subgroup + write the milestone
   report.** A single global-threshold abstain rule (full Mondrian comes
-  later) and one subgroup table (normal vs. "any extreme"). In parallel,
+  later) and one subgroup table (normal vs. "any extreme"). **Abstention +
+  subgroup tables DONE (2026-10-28)**: at alpha = 0.05 coverage 0.947 (target
+  0.95) but hotspot coverage only 0.79 and 7.0% of true hotspots confidently
+  missed; on major-event hours coverage drops to 0.75 with 15% abstention.
+  Details in README.md (Week 4). Milestone report still to write. In parallel,
   draft the report: revised thesis sentence and scope changes since the
   proposal; methods section with the label/fold/feature spec above; baseline
   + model table (calibrate-set numbers, stated as preliminary/single
