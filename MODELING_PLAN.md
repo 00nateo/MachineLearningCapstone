@@ -134,6 +134,40 @@ correct):
   11.9% / 9.8% before the NWS fixes) — comparable across cities, in the same
   ballpark as the ~10% hotspot rate.
 
+### How the composite `extreme_flag` works
+
+`extreme_flag` is TRUE for a zone-hour when **any** of the five component
+flags is TRUE for that zone in that hour (a logical OR). Some components
+apply to the whole city at once, others only to particular zones:
+
+| Component | Scope | Fires for |
+|---|---|---|
+| Severe weather | citywide | every zone in that hour |
+| NWS warning | citywide | every zone in that hour |
+| Transit disruption | NYC: citywide (subway alerts); Chicago: per community area per day (CTA anomaly) | NYC: every zone; Chicago: that area, all day |
+| Major event (attendance >= 15,000) | per zone | the venue's zone, or for out-of-zone venues (MetLife, UBS Arena, ...) their entry zones, from start - 1 h to end + 1 h |
+| Flight delays | per zone | the airport's zone only (JFK 132, LGA 138, EWR 1, ORD 76, MDW 56) |
+
+So a snowstorm hour flags all 263 NYC zones, while a Knicks game flags only
+MSG's zone. The flag is computed on the **actual hour h**, not lagged, so it
+describes what really happened. It is never a model input. It does three
+jobs:
+
+1. **Training sampling:** every day with an extreme hour is always kept,
+   and extreme rows are up-weighted (~3x).
+2. **Evaluation subsets:** metrics are reported separately for extreme vs
+   normal hours. The failure criterion is the model abstaining on most
+   extreme cases.
+3. **Mondrian conformal:** separate calibration thresholds for extreme vs
+   normal hours.
+
+Gap to fix: `features.py` writes only `extreme_flag` (and `event_flag`), not
+the five component flags. The per-condition evaluation (weather vs NWS vs
+transit vs flights vs events) needs them, so `assemble_nyc` /
+`assemble_chicago` should also output `severe_weather_flag`,
+`nws_warning_flag`, `transit_disruption_flag`, `major_event_flag` and
+`flight_delay_flag`.
+
 ## Case-study days
 
 Specific hectic days to examine one by one on the test set, beyond the
@@ -156,6 +190,18 @@ Add new candidates here with their dates as they come up.
   list. World Cup games are not in the event data yet (would need the ESPN
   `soccer/fifa.world` league added to `fetch_sports.py`; MetLife would then
   map to the Penn Station / Port Authority entry zones).
+- **UN General Assembly high-level week (NYC, every September).** Heads of
+  state arrive, with large street closures and motorcade "frozen zones"
+  around UN headquarters (First Ave, roughly E 42nd-48th St, Turtle Bay /
+  Midtown East) and across Midtown. The UNGA80 general debate opened
+  2025-09-23; 2026 dates to confirm. Unlike the one-offs above, it recurs
+  yearly: earlier editions fall in training (2019, 2021, 2022; 2020 was
+  virtual and is excluded anyway), early-stop (2023) and calibration (2024),
+  so this tests whether the model learned a recurring disruption. Not in the
+  event data; the closures could be marked from NYC's permitted-event /
+  street-closure records or by date.
+- **Taylor Swift's wedding (NYC).** Reported to cause large street
+  closures. Date and location to fill in, then pick the zones to watch.
 
 ## Steps
 
