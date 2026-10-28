@@ -43,6 +43,14 @@ FLIGHT_MIN_SCHEDULED = 5  # below this, delayed/scheduled is small-denominator n
 # official NWS VTEC phenomena table before the final report; it's a reasonable first pass, not
 # verified code-by-code.
 DRIVING_PHENOMENA = "'SV','TO','FF','WS','BZ','IS','WC','HW','EH','XH','EC','DS','SQ'"
+# NWS county (xxC) and forecast-zone (xxZ) codes that cover each city. The `city` column only
+# names the forecast office, whose area runs well past the city (LOT covers ~20 counties), so
+# warnings are kept only if they name one of these. Checked against api.weather.gov zone names.
+NWS_UGC = {
+    "nyc": "'NYC005','NYC047','NYC061','NYC081','NYC085',"  # the five borough counties
+           "'NYZ072','NYZ073','NYZ074','NYZ075','NYZ176','NYZ178'",  # Manhattan, Bronx, Staten Is., Brooklyn, N/S Queens
+    "chicago": "'ILC031','ILZ014','ILZ103','ILZ104'",  # Cook County; zone ILZ014 split into Northern/Central Cook (103/104) in 2020-03
+}
 
 
 def connect():
@@ -103,10 +111,13 @@ def nws_table(con, city):
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE nws_hourly AS
         WITH warnings AS (
-            SELECT timezone('{tz}', utc_issue) AS start_local,
-                   timezone('{tz}', utc_expire) AS end_local
+            -- utc_* are naive UTC: tag them as UTC, then convert to naive local wall-clock time
+            -- (a single timezone(tz, ts) would read them as local time, 4-5 h late).
+            SELECT DISTINCT timezone('{tz}', timezone('UTC', utc_issue)) AS start_local,
+                   timezone('{tz}', timezone('UTC', utc_expire)) AS end_local
             FROM read_parquet('{EXPORT}/nws_warnings.parquet')
-            WHERE city = '{city}' AND significance = 'W' AND phenomena IN ({DRIVING_PHENOMENA})),
+            WHERE city = '{city}' AND significance = 'W' AND phenomena IN ({DRIVING_PHENOMENA})
+              AND gtype = 'C' AND ugc IN ({NWS_UGC[city]})),
         hours AS (SELECT DISTINCT hour FROM lagged),
         flagged AS (
             SELECT h.hour, bool_or(w.start_local IS NOT NULL) AS nws_warning_flag
