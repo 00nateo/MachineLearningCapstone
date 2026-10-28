@@ -70,25 +70,59 @@ coverage estimates need to be honest there.
 
 ## Extreme-condition flags
 
-Reasonable, auditable defaults for a student project — not research-grade
-tuned; state this in the report.
+Implemented in `scripts/features.py`. Initial thresholds were reasonable
+guesses; several turned out to be badly miscalibrated once checked against
+the real data and were corrected (worth stating this explicitly in the
+report as evidence the pipeline was actually validated, not just assumed
+correct):
 
-- **Severe weather**: METAR at the city's primary station (NYC: LGA or
-  Central Park; Chicago: ORD) shows snow / freezing precip / thunderstorm
-  code, OR visibility < 1 statute mile, OR sustained wind >= 25 kt.
-- **NWS warning**: hour overlaps a Warning-level (not Watch/Advisory) VTEC
-  product in `nws_warnings`.
+- **Severe weather**: METAR at the city's primary station (NYC: Central
+  Park; Chicago: ORD) shows snow / freezing precip / thunderstorm code, OR
+  visibility < 1 statute mile, OR sustained wind >= 25 kt. Checked against
+  known storms — top severe-weather days include 2021-02-01 (the Feb 2021
+  nor'easter), 2018-03-07/03-21 (the "four nor'easters of March 2018"), and
+  2022-01-29 (the Jan 2022 blizzard). Rate: ~2.2% of NYC hours. No fix
+  needed, this one was fine from the start.
+- **NWS warning**: hour overlaps a Warning-level (`significance = 'W'`) VTEC
+  product in `nws_warnings`, restricted to a driving-hazard phenomena list
+  (`SV, TO, FF, WS, BZ, IS, WC, HW, EH, XH, EC, DS, SQ`) — **corrected**
+  after finding that "any Warning-level product" included marine-only
+  warnings and slow-onset river/areal flood warnings (`FL`/`FA`); `FL` alone
+  averages ~100h per warning in Chicago (vs ~14h in NYC) and was inflating
+  Chicago's flag to 2.75x NYC's (220.5k vs 88.5k total warning-hours before
+  the filter; 26.8k vs 29.0k after — comparable). This phenomena list is a
+  reasonable first pass, not verified code-by-code against the official NWS
+  VTEC table — worth a second look before the final report. Rate: ~2.5%
+  (NYC) / ~3.2% (Chicago) of hours.
 - **Major event**: within [event start - 1h, end + 1h] where attendance >=
-  15,000 or top-decile for that venue.
-- **Transit disruption**: NYC only, via `mta_alerts_hour` — >=1 suspension
-  update or >=3 routes affected. Chicago has no alerts table; approximate
-  with a CTA ridership-anomaly proxy (daily entries far below the trailing
-  4-week same-weekday average) and flag this explicitly as a weaker proxy.
-- **Flight delays**: >=25% of departures or arrivals delayed >=15 min at the
-  city's airport(s), applied to the zone(s) containing that airport.
+  15,000. Verified directly against a known doubleheader weekend at Madison
+  Square Garden (zone 186, not the Midtown zones 161-164 it's easy to guess
+  — checked by venue-name lookup): the 2023-04-22 Rangers game (18,006
+  attendance) and 2023-04-23 Knicks game (19,812 attendance) both fire in
+  exactly their start-1h/end+1h windows.
+- **Transit disruption**: NYC via `mta_alerts_hour` (NYCT Subway agency) —
+  **corrected** from ">=1 suspension update or >=3 routes affected" after
+  finding the median hour already has 4 routes affected from routine
+  schedule-change alerts (that threshold fired 68.5% of the time). Now
+  >=3 suspension updates (~99th percentile) OR >=10 routes affected (~95th
+  percentile). Chicago has no alerts table; approximate with a CTA
+  ridership-anomaly proxy (daily entries < 0.5x the trailing 4-week
+  same-weekday average, zone-day grain broadcast to every hour of that day)
+  — this one was fine at first pass (~2.0% of days), flagged as a weaker
+  proxy regardless since it can't be sharper than daily.
+- **Flight delays**: **corrected** from ">=25% of flights delayed >=15 min"
+  (fired 24-32% of hours — not "extreme") to >=50% (the real ~90th
+  percentile across JFK/LGA/EWR) with a minimum of 5 scheduled flights in
+  that hour (below that, the delayed/scheduled ratio is small-denominator
+  noise — p99 of the raw ratio exceeds 1.0 in quiet overnight hours).
+  Applied to the zone(s) containing that airport (JFK=132, LGA=138, EWR=1,
+  ORD=76, MDW=56 — Chicago's zone IDs found via `ST_Contains` against each
+  airport's real coordinates, not by name/memory; Midway sits in Garfield
+  Ridge, not Clearing).
 - **Composite "extreme" flag** = union of the above. Used both as the
   stress-test subgroup and as the upweight/always-keep flag in training
-  sampling.
+  sampling. Final rate: ~11.9% of NYC hours, ~9.8% of Chicago hours —
+  comparable across cities, in the same ballpark as the ~10% hotspot rate.
 
 ## Steps
 
@@ -142,22 +176,24 @@ tuned; state this in the report.
 New scripts under `scripts/`, following the existing `export.py` /
 `aggregate.py` DuckDB style:
 
-- `label.py` — decile-rank hotspot label + fold-tag column, per city, from
-  `*_zone_hour.parquet`.
-- `features.py` — lag/rolling features computed on the full series, plus
-  weather/NWS/event/transit/flight joins and the composite extreme flag.
-  Outputs one feature table per city.
-- `sample.py` — applies the stratified day-sampling/weighting rule to the
-  train split only.
-- `baseline.py` — seasonal-last-week and 4-week-average baselines, ranked to
-  top decile.
-- `train.py` — LightGBM per city per fold, early-stopped, fixed seeds,
-  scored on AUC-PR and top-decile precision/recall.
-- `conformal.py` — Mondrian conformal layer: fit on calibrate, sweep alpha
-  0.01-0.20, track singleton/full/empty prediction sets separately.
-- `evaluate.py` — accuracy-when-confident, abstention rate, per-subgroup
-  breakdown, near-hit and drive-time domain metrics, calibration-vs-test
-  coverage gap per fold (+ random-week no-shift reference).
+- `label.py` **(done)** — decile-rank hotspot label + fold-tag column, per
+  city, from `*_zone_hour.parquet`.
+- `features.py` **(done)** — lag/rolling features computed on the full
+  series, plus weather/NWS/event/transit/flight joins and the composite
+  extreme flag. Outputs one feature table per city.
+- `sample.py` **(pending)** — applies the stratified day-sampling/weighting
+  rule to the train split only.
+- `baseline.py` **(pending)** — seasonal-last-week and 4-week-average
+  baselines, ranked to top decile.
+- `train.py` **(pending)** — LightGBM per city per fold, early-stopped,
+  fixed seeds, scored on AUC-PR and top-decile precision/recall.
+- `conformal.py` **(pending)** — Mondrian conformal layer: fit on calibrate,
+  sweep alpha 0.01-0.20, track singleton/full/empty prediction sets
+  separately.
+- `evaluate.py` **(pending)** — accuracy-when-confident, abstention rate,
+  per-subgroup breakdown, near-hit and drive-time domain metrics,
+  calibration-vs-test coverage gap per fold (+ random-week no-shift
+  reference).
 
 ## Week-by-week action plan (relabel to the actual calendar)
 
@@ -165,13 +201,19 @@ Maps to the milestone rubric: Progress from Proposal; Approach/Technical
 Rigor; Baseline/Evidence/Evaluation Design; Preliminary Findings and
 Interpretation; Completion Plan/Record/Contributions/Writing.
 
-- **Week 1 — Label, split, core lags.** Build `label.py` and the lag part of
-  `features.py`, fold-3 only. Check: no leakage across the COVID gap, DST
-  -merged hour doesn't duplicate lag rows.
-- **Week 2 — Joins + extreme flags.** Finish `features.py` for NYC fold 3:
-  weather/NWS/flights and events/transit joins, each with its lag convention
-  documented inline (reuse the `CONVENTIONS` block style from `export.py`).
-- **Week 3 — Baselines + first model.** `baseline.py` (both baselines) +
+- **Week 1 — DONE.** Label, split, core lags. `label.py` (hotspot label +
+  fold1/fold2/fold3 tags) and the lag part of `features.py`, run for both
+  cities and all three folds (ahead of the fold-3-only minimum). Verified: no
+  `train`-tagged row falls inside the COVID gap in any fold; no duplicate
+  (zone, hour) keys; lag NULLs land only at each zone's series start;
+  hotspot rate ~10.2%.
+- **Week 2 — DONE.** Joins + extreme flags. `features.py` extended with
+  weather/NWS/events/transit/flights joins and the composite `extreme_flag`,
+  run for both cities. Three threshold bugs found and fixed by checking
+  against real data instead of trusting first-draft defaults (transit
+  disruption, NWS phenomena, flight delay rate — see Extreme-condition flags
+  above for the numbers). Final `extreme_flag` rate: 11.9% NYC, 9.8% Chicago.
+- **Week 3 — NEXT. Baselines + first model.** `baseline.py` (both baselines) +
   `train.py` on NYC fold 3, scored on calibrate. This is the required
   preliminary result.
 - **Week 4 — Simple abstention + one subgroup + write the milestone
