@@ -6,7 +6,8 @@ Two different things live in this table, and they must not be confused:
   - Predictive features (the *_lag1 / *_lag24 / *_lag168 / *_sched columns) are what the
     model sees. Anything observational is lagged >= 1h; anything known in advance (events,
     flight schedules) may describe hour h itself. See MODELING_PLAN.md.
-  - The composite `extreme_flag` (and its *_flag components) is NEVER fed to the model. It
+  - The composite `extreme_flag` (and its *_flag components, written alongside it so evaluation
+    can slice by condition) is NEVER fed to the model. It
     is computed on the actual, unlagged hour h and used only for (a) stratified training-day
     sampling weight and (b) slicing evaluation into normal/extreme subgroups. Using same-hour
     truth here is not leakage because the model never sees this column.
@@ -236,6 +237,11 @@ def assemble_nyc(con):
                    e.event_flag, e.event_attendance,
                    t.subway_entries_lag1, t.subway_transfers_lag1,
                    fl.flight_sched_count, fl.flight_delay_rate_lag1,
+                   coalesce(w.severe_weather_flag, false) AS severe_weather_flag,
+                   coalesce(n.nws_warning_flag, false) AS nws_warning_flag,
+                   coalesce(e.major_event_flag, false) AS major_event_flag,
+                   coalesce(th.transit_disruption_flag, false) AS transit_disruption_flag,
+                   coalesce(fl.flight_delay_flag, false) AS flight_delay_flag,
                    coalesce(w.severe_weather_flag, false)
                        OR coalesce(n.nws_warning_flag, false)
                        OR coalesce(e.major_event_flag, false)
@@ -263,6 +269,11 @@ def assemble_chicago(con):
                    e.event_flag, e.event_attendance,
                    t.cta_rides_prevday,
                    fl.flight_sched_count, fl.flight_delay_rate_lag1,
+                   coalesce(w.severe_weather_flag, false) AS severe_weather_flag,
+                   coalesce(n.nws_warning_flag, false) AS nws_warning_flag,
+                   coalesce(e.major_event_flag, false) AS major_event_flag,
+                   coalesce(t.transit_disruption_flag, false) AS transit_disruption_flag,
+                   coalesce(fl.flight_delay_flag, false) AS flight_delay_flag,
                    coalesce(w.severe_weather_flag, false)
                        OR coalesce(n.nws_warning_flag, false)
                        OR coalesce(e.major_event_flag, false)

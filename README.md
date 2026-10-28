@@ -55,6 +55,28 @@ aggregation to zone-hour panels, and export to the HF dataset
     Chicago hours — comparable across cities, same ballpark as the ~10%
     hotspot rate.
 
+**Modeling — Week 2 addendum (2026-10-28, NWS fixes + component flags):**
+- NWS warning times were being read as local time instead of UTC
+  (`timezone(tz, ts)` on a naive UTC timestamp), so every warning window ran
+  4-5 h late. Now converted with `timezone(tz, timezone('UTC', ts))`.
+  Check: the Jan 2022 blizzard is flagged 01-28 19:00 -> 01-29 16:00 local,
+  matching the storm, instead of midnight-to-midnight on the 29th.
+- NWS warnings were filtered by forecast office (`city`), whose area runs far
+  beyond the city (Chicago's LOT office covers ~20 counties). Now kept only if
+  they name a county or forecast zone covering the city (`NWS_UGC` in
+  `features.py`; codes checked against api.weather.gov).
+- Effect: NWS-warning share of hours 2.5% -> 1.3% (NYC), 3.2% -> 1.6%
+  (Chicago); composite `extreme_flag` 11.9% -> 10.9% (NYC), 9.8% -> 8.4%
+  (Chicago). Hotspot rates unchanged (10.2% / 10.4%).
+- The five component flags (`severe_weather_flag`, `nws_warning_flag`,
+  `major_event_flag`, `transit_disruption_flag`, `flight_delay_flag`) are now
+  written next to `extreme_flag`, so evaluation can report each condition
+  separately. Still never model inputs.
+- Edge case for the write-up: the components have different scopes. Weather,
+  NWS and NYC subway disruption are citywide (every zone in that hour); major
+  events, flight delays and Chicago's CTA anomaly are zone-level. A snowstorm
+  flags all 263 NYC zones; a Knicks game flags only MSG's zone.
+
 **Next**: baselines (seasonal-last-week, 4-week average) and a first
 LightGBM model on NYC fold 3 — the milestone's required preliminary result.
 See `MODELING_PLAN.md` for the full plan, fold definitions, and threshold
