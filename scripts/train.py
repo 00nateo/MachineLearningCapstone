@@ -29,46 +29,21 @@ import time
 from pathlib import Path
 
 import duckdb
-import holidays
 import lightgbm as lgb
 import pandas as pd
 
 from baseline import RESULTS, report, top_decile_call
+from model_data import (CALENDAR, CITY_FEATURES, DEPLOYABLE_ONLY, FLAGS, N_ZONES,
+                        PROC_ML, SUBDIV, TABLE_FEATURES, NOT_AVAILABLE_LIVE,
+                        add_calendar, inputs, load)
 
 ROOT = Path(__file__).resolve().parents[1]
-PROC_ML = ROOT / "data" / "processed_ml"
 MODELS = ROOT / "data" / "models"
-N_ZONES = {"nyc": 263, "chicago": 77}
-SUBDIV = {"nyc": "NY", "chicago": "IL"}
-CALENDAR = ["hour_of_day", "day_of_week", "month", "is_weekend", "is_holiday"]
-TABLE_FEATURES = ["pickup_lag1", "pickup_lag24", "pickup_lag168", "pickup_roll24_mean", "pickup_roll24_std",
-                  "pickup_roll168_mean", "pickup_roll168_std",
-                  "wx_temp_f_lag1", "wx_wind_kt_lag1", "wx_vis_mi_lag1", "nws_warning_active_lag1",
-                  "event_flag", "event_attendance", "flight_sched_count", "flight_delay_rate_lag1"]
-CITY_FEATURES = {"nyc": ["subway_entries_lag1", "subway_transfers_lag1"], "chicago": ["cta_rides_prevday"]}
-NOT_AVAILABLE_LIVE = {"subway_entries_lag1", "subway_transfers_lag1", "cta_rides_prevday", "event_attendance"}
-DEPLOYABLE_ONLY = ["expected_attendance"]  # stand-in for event_attendance in the deployable variant
-FLAGS = ["extreme_flag", "severe_weather_flag", "nws_warning_flag", "major_event_flag",
-         "transit_disruption_flag", "flight_delay_flag"]
 PARAMS = dict(objective="binary", metric=["binary_logloss", "average_precision"], learning_rate=0.05,
               num_leaves=63, min_data_in_leaf=200, feature_fraction=0.8, bagging_fraction=0.8,
               bagging_freq=1, lambda_l2=1.0, seed=42, deterministic=True, verbose=-1,
               num_threads=int(os.environ.get("SLURM_CPUS_PER_TASK", os.cpu_count())))
 MAX_ROUNDS, EARLY_STOP_ROUNDS = 3000, 100
-
-
-def add_calendar(df, city):
-    h = df["hour"]
-    hol = holidays.country_holidays("US", subdiv=SUBDIV[city], years=range(h.dt.year.min(), h.dt.year.max() + 1))
-    return df.assign(hour_of_day=h.dt.hour, day_of_week=h.dt.day_of_week, month=h.dt.month,
-                     is_weekend=h.dt.day_of_week >= 5, is_holiday=h.dt.date.isin(set(hol)))
-
-
-def inputs(city, variant):
-    cols = ["zone", *CALENDAR, *TABLE_FEATURES, *CITY_FEATURES[city]]
-    if variant == "full":
-        return cols
-    return [c for c in cols if c not in NOT_AVAILABLE_LIVE] + DEPLOYABLE_ONLY
 
 
 def matrix(df, city, variant):
@@ -77,16 +52,6 @@ def matrix(df, city, variant):
     for c in X.columns.drop("zone"):
         X[c] = X[c].astype("float32")
     return X
-
-
-def load(con, city, fold):
-    # Numeric features come back as DOUBLE so booleans with gaps (NULL) become NaN for LightGBM.
-    feats = ", ".join(f"{c}::DOUBLE AS {c}" for c in TABLE_FEATURES + CITY_FEATURES[city] + DEPLOYABLE_ONLY)
-    keep = f"zone, hour, hotspot, {feats}, {', '.join(FLAGS)}"
-    train = con.execute(f"SELECT {keep}, weight FROM read_parquet('{PROC_ML / f'{city}_{fold}_train.parquet'}')").df()
-    held = con.execute(f"""SELECT {keep}, {fold} AS split FROM read_parquet('{PROC_ML / f'{city}_features.parquet'}')
-                           WHERE {fold} IN ('early_stop', 'calibrate', 'test') ORDER BY hour, zone""").df()
-    return add_calendar(train, city), add_calendar(held, city)
 
 
 def train(con, city, fold, variant, overrides):

@@ -5,6 +5,69 @@ grain, and published to a Hugging Face dataset by the pipeline in
 `scripts/`. The modeling plan built on top of that dataset is in
 `MODELING_PLAN.md`.
 
+## Apple GPU neural-network comparison
+
+`scripts/train_torch.py` adds a tabular PyTorch classifier alongside LightGBM.
+It uses Apple's GPU through MPS (`--device mps`), with CPU and CUDA options too.
+The model combines an 8-value learned zone embedding with standardized numeric
+features and missing-value indicators, then passes them through 128- and
+64-unit hidden layers with ReLU/dropout and a binary output. This is a different
+model family, so GPU utilization alone does not imply better speed or accuracy.
+
+Both trainers share `scripts/model_data.py`: the same predictor allowlist,
+calendar features, existing training sample/weights, and chronological folds.
+The neural trainer fits imputation/scaling on training rows only, minimizes
+weighted binary cross-entropy with AdamW, and restores the epoch with lowest
+unweighted log loss on `early_stop`. It scores `early_stop` and `calibrate` with
+the existing top-decile rule; test predictions are saved without test metrics.
+Features entirely absent during training stay disabled at inference even if
+observations become available later (notably MTA ridership in fold 1).
+`full` and `deployable` have the same feature-availability assumptions as
+LightGBM, including the outstanding flight-data publication-delay limitation.
+
+Use a separate Python 3.12 environment (the existing Python 3.9 environment can
+remain available for LightGBM):
+
+```sh
+python3.12 -m venv .venv-torch
+source .venv-torch/bin/activate
+python -m pip install -r requirements-torch.txt
+```
+
+Build `*_labeled.parquet`, `*_features.parquet`, and `*_fold3_train.parquet`
+with `label.py`, `features.py`, and `sample.py` first. Existing files from the
+LightGBM run are reusable. Then:
+
+```sh
+python scripts/train_torch.py --city nyc --device mps
+python scripts/evaluate.py --city nyc --model torch
+python scripts/conformal.py --city nyc --model torch
+```
+
+For the deployable variant, add `--variant deployable` to all three commands.
+Default training is at most 50 epochs with patience 5 and batches of 8,192;
+adjust `--epochs`, `--batch-size`, `--lr`, `--hidden`, or `--dropout` to tune on
+`early_stop`. Do not select hyperparameters on calibration/test performance.
+Training batches stream to GPU by default. `--cache-device` keeps the training
+and validation tensors there for fewer transfers, at a higher memory cost.
+The script prints the selected device and epoch timings; its history CSV
+records validation loss and throughput. Seeds are fixed, but bitwise GPU
+reproducibility is not guaranteed. Numeric features/weights use float32.
+
+Artifacts have their own tag, e.g. `nyc_fold3_torch` or
+`nyc_fold3_torch_deployable`: a `.pt` checkpoint in `data/models/`, a prediction
+Parquet in `data/processed_ml/`, and model metrics/training history CSVs in
+`data/results/`. The checkpoint includes CPU-loadable weights, preprocessing,
+architecture, feature names and configuration; `train_torch.restore()` loads
+it for inference (derive calendar columns with `model_data.add_calendar()`
+before calling `train_torch.predict()`). Neural models do not have LightGBM's
+split-gain feature importance, so no equivalent importance file is emitted.
+Existing LightGBM filenames and default evaluation commands are preserved.
+
+Checks: `.venv-torch/bin/python -m unittest discover -s tests -v` exercises
+training-only preprocessing, both feature variants, checkpoint reloads,
+evaluation/conformal outputs, and MPS training when available.
+
 ## Progress so far
 
 **Data pipeline** (pre-existing): Chicago + NYC trip downloads, external

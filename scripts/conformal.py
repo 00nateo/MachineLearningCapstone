@@ -18,7 +18,7 @@ confident-miss rate (share of true hotspots confidently called "not") and precis
 confident hotspot calls. Output: data/results/{tag}_abstention_{mode}.csv
 
 Usage: python scripts/conformal.py [--city nyc] [--fold fold3] [--variant full|deployable]
-                                   [--mode global] [--cal-split 2024-07-01]
+                                   [--mode global] [--cal-split 2024-07-01] [--model lightgbm|torch]
 """
 import argparse
 import math
@@ -28,6 +28,7 @@ import pandas as pd
 
 from baseline import PROC_ML, RESULTS
 from evaluate import CONDITIONS, FLAGS
+from model_data import artifact_tag
 
 ALPHAS = (0.01, 0.02, 0.05, 0.10, 0.15, 0.20)
 CAL_SPLIT = "2024-07-01"  # fold 3: fit on calibrate rows before this hour, evaluate on the rest
@@ -61,8 +62,8 @@ def summarize(d, has_hot, has_not):
         confident_hotspot_precision=(conf_hot & y).sum() / max(conf_hot.sum(), 1))
 
 
-def run(city, fold, variant, mode, cal_split):
-    tag = f"{city}_{fold}" + ("" if variant == "full" else f"_{variant}")
+def run(city, fold, variant, mode, cal_split, model="lightgbm"):
+    tag = artifact_tag(city, fold, model, variant)
     pred = pd.read_parquet(PROC_ML / f"{tag}_pred.parquet")
     pred = pred[pred["split"] == "calibrate"]
     pred[["hotspot", *FLAGS]] = pred[["hotspot", *FLAGS]].astype(bool)
@@ -97,10 +98,11 @@ def main():
     ap.add_argument("--variant", default="full", choices=["full", "deployable"])
     ap.add_argument("--mode", default="global", choices=["global"])
     ap.add_argument("--cal-split", default=CAL_SPLIT)
+    ap.add_argument("--model", choices=["lightgbm", "torch"], default="lightgbm")
     a = ap.parse_args()
     for city in a.city:
         for fold in a.fold:
-            run(city, fold, a.variant, a.mode, a.cal_split)
+            run(city, fold, a.variant, a.mode, a.cal_split, a.model)
 
 
 if __name__ == "__main__":

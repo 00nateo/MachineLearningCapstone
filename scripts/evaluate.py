@@ -13,6 +13,7 @@ Test stays untouched until the conformal step. Why each metric:
 Outputs: data/results/{city}_{fold}_eval_{ci,calibration,conditions,monthly}.csv
 
 Usage: python scripts/evaluate.py [--city nyc] [--fold fold3] [--split calibrate] [--boot 1000]
+                                 [--model lightgbm|torch] [--variant full|deployable]
 """
 import argparse
 
@@ -20,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from baseline import PROC_ML, RESULTS, metrics
+from model_data import artifact_tag, model_name
 
 FLAGS = ["extreme_flag", "severe_weather_flag", "nws_warning_flag", "major_event_flag",
          "transit_disruption_flag", "flight_delay_flag"]
@@ -31,9 +33,10 @@ CONDITIONS = {  # subset name -> flag column (normal = no extreme flag)
 BASELINES = ("avg_4wk", "seasonal_naive")
 
 
-def load(city, fold, split):
-    m = pd.read_parquet(PROC_ML / f"{city}_{fold}_pred.parquet")
-    m = m[m["split"] == split].assign(model="lightgbm")
+def load(city, fold, split, model="lightgbm", variant="full"):
+    tag = artifact_tag(city, fold, model, variant)
+    m = pd.read_parquet(PROC_ML / f"{tag}_pred.parquet")
+    m = m[m["split"] == split].assign(model=model_name(model, variant))
     b = pd.read_parquet(PROC_ML / f"{city}_{fold}_baseline_pred.parquet")
     b = b[b["split"] == split].drop(columns="split").merge(m[["zone", "hour", "hotspot", *FLAGS]], on=["zone", "hour"])
     cols = ["model", "zone", "hour", "hotspot", "score", "call", *FLAGS]
@@ -47,32 +50,32 @@ def prf(tp, fp, fn):
     return p, r, 2 * p * r / np.maximum(p + r, 1e-12)
 
 
-def bootstrap(df, n_boot, seed=42):
+def bootstrap(df, n_boot, seed=42, model="lightgbm"):
     """Point estimates and day-block bootstrap 95% intervals; gaps use the same resampled days."""
     d = df.assign(day=df["hour"].dt.normalize(), tp=df["call"] & df["hotspot"],
                   fp=df["call"] & ~df["hotspot"], fn=~df["call"] & df["hotspot"])
     daily = d.groupby(["model", "day"])[["tp", "fp", "fn"]].sum().unstack("model")
     idx = np.random.default_rng(seed).integers(0, len(daily), size=(n_boot, len(daily)))
     rows, point_f1, boot_f1 = [], {}, {}
-    for model in df["model"].unique():
-        counts = [daily[(s, model)].to_numpy() for s in ("tp", "fp", "fn")]
+    for name_model in df["model"].unique():
+        counts = [daily[(s, name_model)].to_numpy() for s in ("tp", "fp", "fn")]
         points = prf(*(c.sum() for c in counts))
         boots = prf(*(c[idx].sum(axis=1) for c in counts))
         for name, pt, bt in zip(("precision", "recall", "f1"), points, boots):
-            rows.append(dict(comparison=model, metric=name, estimate=pt,
+            rows.append(dict(comparison=name_model, metric=name, estimate=pt,
                              ci_low=np.percentile(bt, 2.5), ci_high=np.percentile(bt, 97.5)))
-        point_f1[model], boot_f1[model] = points[2], boots[2]
+        point_f1[name_model], boot_f1[name_model] = points[2], boots[2]
     for base in BASELINES:
-        gap = boot_f1["lightgbm"] - boot_f1[base]
-        rows.append(dict(comparison=f"lightgbm minus {base}", metric="f1 gap",
-                         estimate=point_f1["lightgbm"] - point_f1[base],
+        gap = boot_f1[model] - boot_f1[base]
+        rows.append(dict(comparison=f"{model} minus {base}", metric="f1 gap",
+                         estimate=point_f1[model] - point_f1[base],
                          ci_low=np.percentile(gap, 2.5), ci_high=np.percentile(gap, 97.5)))
     return pd.DataFrame(rows), len(daily)
 
 
-def calibration(df):
+def calibration(df, model="lightgbm"):
     """Reliability table (10 probability bins), Brier score overall and by condition, and ECE."""
-    m = df[df["model"] == "lightgbm"]
+    m = df[df["model"] == model]
     y, p = m["hotspot"].to_numpy(float), m["score"].to_numpy()
     tab = (m.assign(bin=pd.cut(m["score"], np.linspace(0, 1, 11), include_lowest=True))
            .groupby("bin", observed=True)
@@ -105,11 +108,12 @@ def monthly(df):
     return g.drop(columns=["tp", "fp", "fn"])
 
 
-def evaluate(city, fold, split, n_boot):
-    df = load(city, fold, split)
-    prefix = RESULTS / f"{city}_{fold}_eval"
-    ci, days = bootstrap(df, n_boot)
-    tab, brier, ece = calibration(df)
+def evaluate(city, fold, split, n_boot, model="lightgbm", variant="full"):
+    df = load(city, fold, split, model, variant)
+    name = model_name(model, variant)
+    prefix = RESULTS / f"{artifact_tag(city, fold, model, variant)}_eval"
+    ci, days = bootstrap(df, n_boot, model=name)
+    tab, brier, ece = calibration(df, name)
     cond, mon = conditions(df), monthly(df)
     ci.to_csv(f"{prefix}_ci.csv", index=False)
     tab.assign(**{f"brier_{k}": v for k, v in brier.items()}, ece=ece).to_csv(f"{prefix}_calibration.csv", index=False)
@@ -117,11 +121,11 @@ def evaluate(city, fold, split, n_boot):
     mon.to_csv(f"{prefix}_monthly.csv", index=False)
     print(f"{city} {fold} {split}: {days} days, {n_boot} day-block bootstrap resamples\n"
           + ci.round(4).to_string(index=False)
-          + f"\n\nLightGBM calibration: Brier {brier['all']:.4f} (normal {brier['normal']:.4f}, "
+          + f"\n\n{name} calibration: Brier {brier['all']:.4f} (normal {brier['normal']:.4f}, "
             f"extreme {brier['extreme']:.4f}), ECE {ece:.4f}\n" + tab.round(3).to_string(index=False)
           + "\n\nBy condition (F1, share of zone-hours):\n"
           + cond.pivot_table(index="condition", columns="model", values="f1").round(3)
-                .join(cond[cond["model"] == "lightgbm"].set_index("condition")[["share_of_zone_hours", "hotspot_rate"]].round(3))
+                .join(cond[cond["model"] == name].set_index("condition")[["share_of_zone_hours", "hotspot_rate"]].round(3))
                 .to_string()
           + "\n\nMonthly F1:\n" + mon.pivot_table(index="month", columns="model", values="f1").round(3).to_string(),
           flush=True)
@@ -133,10 +137,12 @@ def main():
     ap.add_argument("--fold", nargs="+", default=["fold3"])
     ap.add_argument("--split", default="calibrate", choices=["early_stop", "calibrate"])
     ap.add_argument("--boot", type=int, default=1000)
+    ap.add_argument("--model", choices=["lightgbm", "torch"], default="lightgbm")
+    ap.add_argument("--variant", choices=["full", "deployable"], default="full")
     a = ap.parse_args()
     for city in a.city:
         for fold in a.fold:
-            evaluate(city, fold, a.split, a.boot)
+            evaluate(city, fold, a.split, a.boot, a.model, a.variant)
 
 
 if __name__ == "__main__":
