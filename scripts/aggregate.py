@@ -3,8 +3,9 @@
 
 Outputs in data/processed/:
   {city}_zone_hour.parquet    zone, hour, pickups, dropoffs (zero-filled over every zone x hour),
-                              median_wait_s, median_fare, median_driver_pay, median_trip_miles
-                              (medians over that zone-hour's pickups; NULL when it has none)
+                              median_wait_s, median_fare, median_driver_pay, median_trip_miles,
+                              median_trip_seconds (medians over that zone-hour's pickups; NULL
+                              when it has none; trip seconds within the drive-time bounds)
   {city}_city_hour.parquet    hour, dst_merged_hour, pickups_total, pickups_unzoned
   {city}_drive_times.parquet  year, pu_zone, do_zone, hour_of_day, is_weekend,
                               n_trips, median_trip_seconds
@@ -93,7 +94,8 @@ def build_panels(con, city, c, files):
     con.execute("""
         CREATE OR REPLACE TEMP TABLE counts (
             hour TIMESTAMP, zone SMALLINT, pickups INTEGER, median_wait_s DOUBLE,
-            median_fare DOUBLE, median_driver_pay DOUBLE, median_trip_miles DOUBLE)""")
+            median_fare DOUBLE, median_driver_pay DOUBLE, median_trip_miles DOUBLE,
+            median_trip_seconds DOUBLE)""")
     con.execute("CREATE OR REPLACE TEMP TABLE drops (hour TIMESTAMP, zone SMALLINT, dropoffs INTEGER)")
     # One month file at a time keeps the medians' memory bounded. A pickup hour never spans
     # files, so the medians are exact; dropoff hours can (trips ending after midnight on the
@@ -104,7 +106,8 @@ def build_panels(con, city, c, files):
             INSERT INTO counts
             SELECT hour, pu_zone, count(*),
                    median(wait_seconds) FILTER (wait_seconds BETWEEN 0 AND {MAX_WAIT_SECONDS}),
-                   median(fare), median(driver_pay), median(trip_miles)
+                   median(fare), median(driver_pay), median(trip_miles),
+                   median(trip_seconds) FILTER (trip_seconds BETWEEN {MIN_TRIP_SECONDS} AND {MAX_TRIP_SECONDS})
             FROM ({trips}) GROUP BY hour, pu_zone""")
         con.execute(f"""
             INSERT INTO drops
@@ -123,7 +126,8 @@ def build_panels(con, city, c, files):
     write_parquet(con, f"""
         SELECT z.zone::SMALLINT AS zone, g.hour,
                coalesce(c.pickups, 0) AS pickups, coalesce(d.dropoffs, 0) AS dropoffs,
-               c.median_wait_s, c.median_fare, c.median_driver_pay, c.median_trip_miles
+               c.median_wait_s, c.median_fare, c.median_driver_pay, c.median_trip_miles,
+               c.median_trip_seconds
         FROM grid g CROSS JOIN range(1, {c['n_zones'] + 1}) z(zone)
         LEFT JOIN counts c ON c.hour = g.hour AND c.zone = z.zone
         LEFT JOIN (SELECT hour, zone, sum(dropoffs)::INTEGER AS dropoffs FROM drops GROUP BY hour, zone) d

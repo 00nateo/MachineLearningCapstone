@@ -15,7 +15,8 @@ mkdir -p "$SLURM_SUBMIT_DIR/data/external"
 cd "$SLURM_SUBMIT_DIR/data/external"
 
 fail=0
-for s in fetch_geo.sh fetch_weather.py fetch_nws.py fetch_bts.py fetch_mta.py fetch_cta.py; do
+for s in fetch_geo.sh fetch_weather.py fetch_nws.py fetch_bts.py fetch_mta.py fetch_cta.py \
+         fetch_sports.py fetch_concerts.py fetch_venues.py; do
   echo "=== $s  $(date) ==="
   case "$s" in
     *.sh) bash "$SCRIPTS/$s" ;;

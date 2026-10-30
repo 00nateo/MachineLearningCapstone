@@ -6,7 +6,8 @@ Two different things live in this table, and they must not be confused:
   - Predictive features (the *_lag1 / *_lag24 / *_lag168 / *_sched columns) are what the
     model sees. Anything observational is lagged >= 1h; anything known in advance (events,
     flight schedules) may describe hour h itself. See MODELING_PLAN.md.
-  - The composite `extreme_flag` (and its *_flag components) is NEVER fed to the model. It
+  - The composite `extreme_flag` (and its *_flag components, written alongside it so evaluation
+    can slice by condition) is NEVER fed to the model. It
     is computed on the actual, unlagged hour h and used only for (a) stratified training-day
     sampling weight and (b) slicing evaluation into normal/extreme subgroups. Using same-hour
     truth here is not leakage because the model never sees this column.
@@ -43,6 +44,14 @@ FLIGHT_MIN_SCHEDULED = 5  # below this, delayed/scheduled is small-denominator n
 # official NWS VTEC phenomena table before the final report; it's a reasonable first pass, not
 # verified code-by-code.
 DRIVING_PHENOMENA = "'SV','TO','FF','WS','BZ','IS','WC','HW','EH','XH','EC','DS','SQ'"
+# NWS county (xxC) and forecast-zone (xxZ) codes that cover each city. The `city` column only
+# names the forecast office, whose area runs well past the city (LOT covers ~20 counties), so
+# warnings are kept only if they name one of these. Checked against api.weather.gov zone names.
+NWS_UGC = {
+    "nyc": "'NYC005','NYC047','NYC061','NYC081','NYC085',"  # the five borough counties
+           "'NYZ072','NYZ073','NYZ074','NYZ075','NYZ176','NYZ178'",  # Manhattan, Bronx, Staten Is., Brooklyn, N/S Queens
+    "chicago": "'ILC031','ILZ014','ILZ103','ILZ104'",  # Cook County; zone ILZ014 split into Northern/Central Cook (103/104) in 2020-03
+}
 
 
 def connect():
@@ -103,10 +112,13 @@ def nws_table(con, city):
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE nws_hourly AS
         WITH warnings AS (
-            SELECT timezone('{tz}', utc_issue) AS start_local,
-                   timezone('{tz}', utc_expire) AS end_local
+            -- utc_* are naive UTC: tag them as UTC, then convert to naive local wall-clock time
+            -- (a single timezone(tz, ts) would read them as local time, 4-5 h late).
+            SELECT DISTINCT timezone('{tz}', timezone('UTC', utc_issue)) AS start_local,
+                   timezone('{tz}', timezone('UTC', utc_expire)) AS end_local
             FROM read_parquet('{EXPORT}/nws_warnings.parquet')
-            WHERE city = '{city}' AND significance = 'W' AND phenomena IN ({DRIVING_PHENOMENA})),
+            WHERE city = '{city}' AND significance = 'W' AND phenomena IN ({DRIVING_PHENOMENA})
+              AND gtype = 'C' AND ugc IN ({NWS_UGC[city]})),
         hours AS (SELECT DISTINCT hour FROM lagged),
         flagged AS (
             SELECT h.hour, bool_or(w.start_local IS NOT NULL) AS nws_warning_flag
@@ -121,24 +133,42 @@ def nws_table(con, city):
 def events_table(con, city):
     # events.city / event_venues.city hold the venue's actual municipality (Queens, Newark, ...),
     # not the metro -- `metro` is the column that actually takes 'nyc' / 'chicago' values.
+    #
+    # expected_attendance: what a forecaster could know beforehand, since actual attendance is
+    # reported after the event. Average attendance of earlier events with the same crowd key
+    # (league + home team for games, e.g. "nba | New York Knicks"; league + venue otherwise),
+    # over calendar days strictly before this event's date. Zero-attendance games (no fans,
+    # 2020-21) are skipped. NULL when there's no history (first game, concerts, US Open).
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE events_expected AS
+        WITH e AS (
+            SELECT *, CASE WHEN source = 'espn' AND title LIKE '% at %'
+                           THEN league || ' | ' || split_part(title, ' at ', 2)
+                           ELSE league || ' | ' || venue_name END AS crowd_key
+            FROM read_parquet('{EXPORT}/events.parquet') WHERE metro = '{city}')
+        SELECT *, avg(CASE WHEN attendance > 0 THEN attendance END) OVER (
+                      PARTITION BY crowd_key ORDER BY start_local::DATE
+                      RANGE BETWEEN UNBOUNDED PRECEDING AND INTERVAL 1 DAY PRECEDING) AS expected_attendance
+        FROM e""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE events_attributed AS
-        SELECT zone, start_local, end_local_est::TIMESTAMP AS end_local, attendance
-        FROM read_parquet('{EXPORT}/events.parquet')
-        WHERE metro = '{city}' AND zone IS NOT NULL
+        SELECT zone, start_local, end_local_est::TIMESTAMP AS end_local, attendance, expected_attendance
+        FROM events_expected
+        WHERE zone IS NOT NULL
         UNION ALL
         SELECT unnest(v.entry_zones)::SMALLINT AS zone, e.start_local,
-               e.end_local_est::TIMESTAMP AS end_local, e.attendance
-        FROM read_parquet('{EXPORT}/events.parquet') e
+               e.end_local_est::TIMESTAMP AS end_local, e.attendance, e.expected_attendance
+        FROM events_expected e
         JOIN read_parquet('{EXPORT}/event_venues.parquet') v
             ON v.venue_name = e.venue_name AND v.metro = e.metro
-        WHERE e.metro = '{city}' AND e.zone IS NULL AND v.entry_zones IS NOT NULL""")
+        WHERE e.zone IS NULL AND v.entry_zones IS NOT NULL""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE events_zone_hour AS
         WITH hz AS (SELECT DISTINCT zone, hour FROM lagged)
         SELECT hz.zone, hz.hour,
                count(ev.zone) > 0 AS event_flag,
                coalesce(sum(ev.attendance), 0) AS event_attendance,
+               coalesce(sum(ev.expected_attendance), 0) AS expected_attendance,
                bool_or(coalesce(ev.attendance, 0) >= {MAJOR_EVENT_ATTENDANCE}) AS major_event_flag
         FROM hz
         LEFT JOIN events_attributed ev
@@ -151,14 +181,18 @@ def events_table(con, city):
 def transit_table_nyc(con):
     # Routine subway schedule-change alerts touch several routes every hour (median is 4
     # routes affected) -- the plan's original ">= 3 routes" default was checked against the
-    # actual distribution and was far too lenient (68% of hours). >= 10 routes is the ~95th
-    # percentile; >= 3 suspension updates is the ~99th. Both calibrated from the real data,
-    # not assumed.
+    # actual distribution and was far too lenient (68% of hours). The next rule, ">= 3
+    # suspension updates OR >= 10 routes affected", still fired in 8.3% of hours (9.9% of the
+    # 2024 calibrate year), mostly through the routes condition, and that condition is not
+    # comparable over time: MTA's alert system changed in 2020-04 and the newer alerts list
+    # more routes, so ">= 10 routes" swings from 0.8% of hours (2019) to 14.1% (2020).
+    # Suspension updates alone at >= 3 (~98.5th percentile) flag 2.3% of hours, in line with
+    # severe weather (~2%). 2019 is still lower (0.6%): the 2012-2020 archive's labels were
+    # coarser. See README Week 3.
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE transit_hourly AS
         SELECT hour,
-               (coalesce(sum(n_suspension_updates), 0) >= 3
-                OR coalesce(sum(n_routes_affected), 0) >= 10) AS transit_disruption_flag
+               coalesce(sum(n_suspension_updates), 0) >= 3 AS transit_disruption_flag
         FROM read_parquet('{EXPORT}/mta_alerts_hour.parquet')
         WHERE agency = '{NYC_SUBWAY_AGENCY}'
         GROUP BY hour""")
@@ -222,9 +256,14 @@ def assemble_nyc(con):
             SELECT l.*,
                    w.wx_temp_f_lag1, w.wx_wind_kt_lag1, w.wx_vis_mi_lag1,
                    n.nws_warning_active_lag1,
-                   e.event_flag, e.event_attendance,
+                   e.event_flag, e.event_attendance, e.expected_attendance,
                    t.subway_entries_lag1, t.subway_transfers_lag1,
                    fl.flight_sched_count, fl.flight_delay_rate_lag1,
+                   coalesce(w.severe_weather_flag, false) AS severe_weather_flag,
+                   coalesce(n.nws_warning_flag, false) AS nws_warning_flag,
+                   coalesce(e.major_event_flag, false) AS major_event_flag,
+                   coalesce(th.transit_disruption_flag, false) AS transit_disruption_flag,
+                   coalesce(fl.flight_delay_flag, false) AS flight_delay_flag,
                    coalesce(w.severe_weather_flag, false)
                        OR coalesce(n.nws_warning_flag, false)
                        OR coalesce(e.major_event_flag, false)
@@ -249,9 +288,14 @@ def assemble_chicago(con):
             SELECT l.*,
                    w.wx_temp_f_lag1, w.wx_wind_kt_lag1, w.wx_vis_mi_lag1,
                    n.nws_warning_active_lag1,
-                   e.event_flag, e.event_attendance,
+                   e.event_flag, e.event_attendance, e.expected_attendance,
                    t.cta_rides_prevday,
                    fl.flight_sched_count, fl.flight_delay_rate_lag1,
+                   coalesce(w.severe_weather_flag, false) AS severe_weather_flag,
+                   coalesce(n.nws_warning_flag, false) AS nws_warning_flag,
+                   coalesce(e.major_event_flag, false) AS major_event_flag,
+                   coalesce(t.transit_disruption_flag, false) AS transit_disruption_flag,
+                   coalesce(fl.flight_delay_flag, false) AS flight_delay_flag,
                    coalesce(w.severe_weather_flag, false)
                        OR coalesce(n.nws_warning_flag, false)
                        OR coalesce(e.major_event_flag, false)
@@ -280,6 +324,9 @@ def features_city(con, city):
     else:
         transit_table_chicago(con)
         assemble_chicago(con)
+    # Persist calendar annotations for subgroup analysis without changing model allowlists.
+    from calendar_flags import build_for_city
+    build_for_city(city)
 
 
 def main():

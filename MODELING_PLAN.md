@@ -92,8 +92,17 @@ correct):
   Chicago's flag to 2.75x NYC's (220.5k vs 88.5k total warning-hours before
   the filter; 26.8k vs 29.0k after — comparable). This phenomena list is a
   reasonable first pass, not verified code-by-code against the official NWS
-  VTEC table — worth a second look before the final report. Rate: ~2.5%
-  (NYC) / ~3.2% (Chicago) of hours.
+  VTEC table — worth a second look before the final report. **Corrected
+  again (2026-10-28):** (1) warning times were read as local instead of UTC,
+  shifting every window 4-5 h late — now converted with
+  `timezone(tz, timezone('UTC', ts))`; (2) `city` only names the NWS office,
+  whose area runs far beyond the city (LOT covers ~20 counties), so warnings
+  are now kept only if they name a county/zone covering the city (`NWS_UGC`
+  in `features.py`: NYC's five borough counties + their six zones; Cook
+  County + its zones). Check: the Jan 2022 blizzard is now flagged
+  01-28 19:00 -> 01-29 16:00 local (was midnight-to-midnight on the 29th).
+  Rate: ~1.3% (NYC) / ~1.6% (Chicago) of hours, 2019-01 -> 2026-08 (was
+  ~2.5% / ~3.2% before these two fixes).
 - **Major event**: within [event start - 1h, end + 1h] where attendance >=
   15,000. Verified directly against a known doubleheader weekend at Madison
   Square Garden (zone 186, not the Midtown zones 161-164 it's easy to guess
@@ -103,9 +112,15 @@ correct):
 - **Transit disruption**: NYC via `mta_alerts_hour` (NYCT Subway agency) —
   **corrected** from ">=1 suspension update or >=3 routes affected" after
   finding the median hour already has 4 routes affected from routine
-  schedule-change alerts (that threshold fired 68.5% of the time). Now
-  >=3 suspension updates (~99th percentile) OR >=10 routes affected (~95th
-  percentile). Chicago has no alerts table; approximate with a CTA
+  schedule-change alerts (that threshold fired 68.5% of the time). Then
+  >=3 suspension updates OR >=10 routes affected — **corrected again
+  (2026-10-28)** because that still fired in 8.3% of hours, mostly through
+  the routes condition, which isn't comparable over time (MTA's alert
+  system changed in 2020-04 and newer alerts list more routes: ">=10
+  routes" went from 0.8% of hours in 2019 to 14.1% in 2020). **Now >=3
+  suspension updates only** (~98.5th percentile): 2.3% of hours, in line
+  with severe weather. 2019 still flags less (0.6%) because the old
+  archive's labels were coarser. Chicago has no alerts table; approximate with a CTA
   ridership-anomaly proxy (daily entries < 0.5x the trailing 4-week
   same-weekday average, zone-day grain broadcast to every hour of that day)
   — this one was fine at first pass (~2.0% of days), flagged as a weaker
@@ -121,8 +136,79 @@ correct):
   Ridge, not Clearing).
 - **Composite "extreme" flag** = union of the above. Used both as the
   stress-test subgroup and as the upweight/always-keep flag in training
-  sampling. Final rate: ~11.9% of NYC hours, ~9.8% of Chicago hours —
-  comparable across cities, in the same ballpark as the ~10% hotspot rate.
+  sampling. Final rate: **~5.1% of NYC hours, ~8.4% of Chicago hours** (was
+  11.9% / 9.8% originally, then 10.9% / 8.4% after the NWS fixes, then 5.1%
+  for NYC after the transit fix). NYC's composite is now driven by subway
+  suspensions (2.3%) and severe weather (~1.8%) rather than routine alerts.
+
+### How the composite `extreme_flag` works
+
+`extreme_flag` is TRUE for a zone-hour when **any** of the five component
+flags is TRUE for that zone in that hour (a logical OR). Some components
+apply to the whole city at once, others only to particular zones:
+
+| Component | Scope | Fires for |
+|---|---|---|
+| Severe weather | citywide | every zone in that hour |
+| NWS warning | citywide | every zone in that hour |
+| Transit disruption | NYC: citywide (subway alerts); Chicago: per community area per day (CTA anomaly) | NYC: every zone; Chicago: that area, all day |
+| Major event (attendance >= 15,000) | per zone | the venue's zone, or for out-of-zone venues (MetLife, UBS Arena, ...) their entry zones, from start - 1 h to end + 1 h |
+| Flight delays | per zone | the airport's zone only (JFK 132, LGA 138, EWR 1, ORD 76, MDW 56) |
+
+So a snowstorm hour flags all 263 NYC zones, while a Knicks game flags only
+MSG's zone. The flag is computed on the **actual hour h**, not lagged, so it
+describes what really happened. It is never a model input. It does three
+jobs:
+
+1. **Training sampling:** every day with an extreme hour is always kept,
+   and extreme rows are up-weighted (~3x).
+2. **Evaluation subsets:** metrics are reported separately for extreme vs
+   normal hours. The failure criterion is the model abstaining on most
+   extreme cases.
+3. **Mondrian conformal:** separate calibration thresholds for extreme vs
+   normal hours.
+
+Gap to fix: `features.py` writes only `extreme_flag` (and `event_flag`), not
+the five component flags. The per-condition evaluation (weather vs NWS vs
+transit vs flights vs events) needs them, so `assemble_nyc` /
+`assemble_chicago` should also output `severe_weather_flag`,
+`nws_warning_flag`, `transit_disruption_flag`, `major_event_flag` and
+`flight_delay_flag`.
+
+## Case-study days
+
+Specific hectic days to examine one by one on the test set, beyond the
+aggregate extreme-condition subsets: how the model and the abstention layer
+behave hour by hour around each. All fall in fold 3's test period (2025+).
+Add new candidates here with their dates as they come up.
+
+- **Knicks win the 2026 NBA title — 2026-06-13.** Game 5 of the Finals,
+  away at San Antonio (Frost Bank Center), tip-off 20:30 ET; Knicks won
+  94-90 to take the series 4-1. Look at NYC the night of 06-13 into the
+  early hours of 06-14 (watch parties, street celebrations, especially
+  around MSG/Midtown), plus the championship parade (date not recorded
+  yet — add it). Related: the two home Finals games at MSG, 2026-06-08
+  (Game 3, loss) and 2026-06-10 (Game 4, win), which are in `events.parquet`.
+  The clinching game itself is *not* in `events.parquet` (only games at
+  NYC/Chicago-area venues are kept), so the model gets no event signal for
+  that night — a good test of how it handles an unscheduled-looking surge.
+- **2026 FIFA World Cup matches in the NY/NJ area** (MetLife Stadium,
+  including the final), plus fan-zone / watch-party nights. Dates still to
+  list. World Cup games are not in the event data yet (would need the ESPN
+  `soccer/fifa.world` league added to `fetch_sports.py`; MetLife would then
+  map to the Penn Station / Port Authority entry zones).
+- **UN General Assembly high-level week (NYC, every September).** Heads of
+  state arrive, with large street closures and motorcade "frozen zones"
+  around UN headquarters (First Ave, roughly E 42nd-48th St, Turtle Bay /
+  Midtown East) and across Midtown. The UNGA80 general debate opened
+  2025-09-23; 2026 dates to confirm. Unlike the one-offs above, it recurs
+  yearly: earlier editions fall in training (2019, 2021, 2022; 2020 was
+  virtual and is excluded anyway), early-stop (2023) and calibration (2024),
+  so this tests whether the model learned a recurring disruption. Not in the
+  event data; the closures could be marked from NYC's permitted-event /
+  street-closure records or by date.
+- **Taylor Swift's wedding (NYC).** Reported to cause large street
+  closures. Date and location to fill in, then pick the zones to watch.
 
 ## Steps
 
@@ -170,6 +256,37 @@ correct):
 - Final numeric tuning of the extreme-condition thresholds above.
 - Whether to add a longer horizon for whole-shift recommendations (beyond
   k = 1 / k = 2).
+- **Feature availability at forecast time (proposed "deployable" ablation).**
+  The 1-hour lag only matches reality for sources published in real time.
+  Observed publication delays as of the 2026-10-27 fetch: weather (METAR) and
+  NWS warnings are live; MTA hourly ridership ran ~2 weeks behind; CTA daily
+  ridership ~3 months; BTS flights and TLC/Chicago trip records ~2 months
+  (live pickup counts only exist inside the platform itself). So
+  `subway_entries_lag1`, `subway_transfers_lag1` and `cta_rides_prevday` are
+  "oracle" features nobody has at forecast time, and `event_attendance` is
+  reported after the game. Keep k = 1 as the core (a platform-side forecaster
+  has live pickups), but run one ablation that lags each feature by its real
+  publication delay (e.g. subway entries from the same hour 2 weeks earlier,
+  CTA from ~90 days earlier) and swaps attendance for the venue's typical
+  attendance. The F1 gap between the two runs measures how much the
+  optimistic features are worth. **Result (2026-10-28, NYC fold 3):** the
+  deployable model (ridership and attendance dropped) scores F1 0.838 on
+  2024 vs 0.858 for the full model and 0.840 for the 4-week average, so it
+  no longer beats the baseline. Subway entries act as a live-activity proxy
+  worth ~2 F1 points. Report both variants. Tried next: replacing attendance
+  with `expected_attendance` (each team's / venue's average from earlier
+  games only, skipping 2020-21 zero-attendance games) made no difference
+  (F1 0.838 -> 0.837; major-event hours 0.799 -> 0.801). Crowd size isn't
+  what the model misses on event hours.
+- **Surge label ("unexpected hotspots") as a second target.** The top-10% label
+  is mostly static (20 zones give 56% of hotspot hours). Proposed alternative:
+  pickups vs the zone's own normal-conditions baseline (8-week same-hour,
+  same-weekday median, excluding extreme hours and holidays), at 1.25x / 1.5x /
+  2x / 3x plus a count-aware z >= 3. Design, results and recommendation in
+  `SURGE_LABEL_DESIGN.md`; labels built by `scripts/surge_label.py`. First
+  model (`scripts/train_surge.py`, NYC fold 3): AUC-PR 0.46, F1 0.45 vs 0.34
+  for the best baseline ("surged last hour"); the deployable model matches the
+  full one. For the group to decide how far to take it after the milestone.
 
 ## Repo-level build plan
 
@@ -181,16 +298,18 @@ New scripts under `scripts/`, following the existing `export.py` /
 - `features.py` **(done)** — lag/rolling features computed on the full
   series, plus weather/NWS/event/transit/flight joins and the composite
   extreme flag. Outputs one feature table per city.
-- `sample.py` **(pending)** — applies the stratified day-sampling/weighting
+- `sample.py` **(done)** — applies the stratified day-sampling/weighting
   rule to the train split only.
-- `baseline.py` **(pending)** — seasonal-last-week and 4-week-average
+- `baseline.py` **(done)** — seasonal-last-week and 4-week-average
   baselines, ranked to top decile.
-- `train.py` **(pending)** — LightGBM per city per fold, early-stopped,
+- `train.py` **(done)** — LightGBM per city per fold, early-stopped,
   fixed seeds, scored on AUC-PR and top-decile precision/recall.
-- `conformal.py` **(pending)** — Mondrian conformal layer: fit on calibrate,
-  sweep alpha 0.01-0.20, track singleton/full/empty prediction sets
-  separately.
-- `evaluate.py` **(pending)** — accuracy-when-confident, abstention rate,
+- `conformal.py` **(global mode done; Mondrian pending)** — conformal layer:
+  fit on calibrate, sweep alpha 0.01-0.20, track singleton/full/empty
+  prediction sets separately. Week 4's global-threshold version measures on
+  Jul-Dec 2024 with thresholds from Jan-Jun 2024 (test untouched).
+- `evaluate.py` **(partly done: intervals, calibration, per-condition and
+  monthly metrics on calibrate)** — still to add: accuracy-when-confident, abstention rate,
   per-subgroup breakdown, near-hit and drive-time domain metrics,
   calibration-vs-test coverage gap per fold (+ random-week no-shift
   reference).
@@ -212,13 +331,19 @@ Interpretation; Completion Plan/Record/Contributions/Writing.
   run for both cities. Three threshold bugs found and fixed by checking
   against real data instead of trusting first-draft defaults (transit
   disruption, NWS phenomena, flight delay rate — see Extreme-condition flags
-  above for the numbers). Final `extreme_flag` rate: 11.9% NYC, 9.8% Chicago.
-- **Week 3 — NEXT. Baselines + first model.** `baseline.py` (both baselines) +
-  `train.py` on NYC fold 3, scored on calibrate. This is the required
-  preliminary result.
+  above for the numbers). Final `extreme_flag` rate: 11.9% NYC, 9.8% Chicago;
+  10.9% / 8.4% after the 2026-10-28 NWS timezone + county-filter fixes.
+- **Week 3 — DONE. Baselines + first model.** `sample.py`, `baseline.py`
+  (both baselines) + `train.py` on NYC fold 3, scored on calibrate. LightGBM
+  top-decile F1 0.857 vs 0.840 (4-week average) and 0.812 (seasonal naive);
+  AUC-PR 0.940. Details, decisions and edge cases in README.md (Week 3).
 - **Week 4 — Simple abstention + one subgroup + write the milestone
   report.** A single global-threshold abstain rule (full Mondrian comes
-  later) and one subgroup table (normal vs. "any extreme"). In parallel,
+  later) and one subgroup table (normal vs. "any extreme"). **Abstention +
+  subgroup tables DONE (2026-10-28)**: at alpha = 0.05 coverage 0.947 (target
+  0.95) but hotspot coverage only 0.79 and 7.0% of true hotspots confidently
+  missed; on major-event hours coverage drops to 0.75 with 15% abstention.
+  Details in README.md (Week 4). Milestone report still to write. In parallel,
   draft the report: revised thesis sentence and scope changes since the
   proposal; methods section with the label/fold/feature spec above; baseline
   + model table (calibrate-set numbers, stated as preliminary/single

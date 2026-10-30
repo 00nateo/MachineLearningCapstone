@@ -2,3 +2,9 @@ duckdb>=1.1
 pandas>=2.2
 pyarrow>=16
 huggingface_hub>=0.24
+numpy
+scikit-learn>=1.5
+lightgbm>=4.6
+geopandas>=1.0
+torch
+holidays>=0.60
