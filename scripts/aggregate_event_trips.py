@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Stream monthly trip Parquet on the cluster into small event-associated OD counts.
+"""Stream monthly trip Parquet locally or on HPC into event-associated OD counts.
 
 NYC: converted nyc_fhvhv files OR original TLC fhvhv monthly Parquet.
 Chicago: converted chicago_trips monthly Parquet (run convert.py on raw CSV first).
@@ -11,7 +11,7 @@ event-associated traffic, not proven attendee movement or causal event effects.
 Prior-week controls use the SAME local-time windows and candidate-zone exclusions.
 Output shards are additive across input months (including midnight dropoffs).
 Absent months are missing coverage, never zero demand. Inspect exposures.parquet
-and manifest.json before forming training labels. No raw trips leave the cluster.
+and manifest.json before forming training labels. Source trip files are read only.
 """
 import argparse
 import glob
@@ -130,7 +130,7 @@ def main():
     ap.add_argument("--control-weeks", type=int, nargs="*", default=[1, 2, 3, 4])
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--memory-limit", default="8GB", help="DuckDB memory budget, independent of total dataset size")
-    ap.add_argument("--temp-dir", type=Path, help="Cluster scratch directory for DuckDB spill")
+    ap.add_argument("--temp-dir", type=Path, help="Local or cluster scratch directory for DuckDB spill")
     ap.add_argument("--start-date", help="First event date, e.g. 2023-01-01")
     ap.add_argument("--end-date", help="Inclusive last event date, e.g. 2024-12-31")
     args = ap.parse_args()

@@ -109,6 +109,33 @@ converted NYC directory; the glob must include December 2023 for January's
 controls. Original TLC monthly `fhvhv_tripdata_YYYY-MM.parquet` also works.
 Chicago requires the converted monthly schema from `convert.py`.
 
+The downloaded `MLCapstoneRideshare/rideshare-trips` dataset also works locally.
+It has the converted schemas above. The current Mac setup links `data/trips`
+to cached revision `b1bcdccf26660bafa3a66042f6a16a0d9bd618a8`; no second copy
+is needed. Keep this link under the ignored `data/` directory and leave the
+cached source files read only. Run a local pilot with:
+
+```sh
+.venv-torch/bin/python scripts/aggregate_event_trips.py --city nyc \
+  --trip-glob 'data/trips/nyc_fhvhv/*.parquet' \
+  --start-date 2024-01-01 --end-date 2024-01-31 \
+  --out data/event_trips/nyc_2024jan_pilot \
+  --threads 8 --memory-limit 8GB --temp-dir data/duckdb_tmp/event_trips
+```
+
+Use a fresh `--out` if that pilot directory already exists. On this Mac, the
+January pilot finished in 2.77 seconds with about 1.24 GB maximum resident
+memory. It produced 264,973 aggregate rows in about 0.37 MB of Parquet, including
+exposure metadata. It read December/January and the February boundary needed
+for late-January spillover. These are measured pilot results, not a promise of
+the same throughput on a multi-year run. `pilot_audit.json` records the checks;
+no invalid zones, nonpositive counts, masked venue targets, or missing required
+month files were found. These checks do not prove that every day of source data
+is complete. For Chicago, the local glob is
+`data/trips/chicago_trips/*/*.parquet` (quote the glob).
+
+For the cluster instead:
+
 ```sh
 mkdir -p logs
 sbatch slurm/10_event_trips.sbatch --city nyc \
