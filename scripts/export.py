@@ -188,7 +188,8 @@ def adjacency(zones, city):
     """Neighbouring zone pairs (polygons within ADJ_TOLERANCE_M), both directions."""
     utm = zones[["zone", "geometry"]].to_crs(UTM[city])
     buf = utm.assign(geometry=utm.buffer(ADJ_TOLERANCE_M))
-    pairs = gpd.sjoin(buf, buf, predicate="intersects")
+    # Buffer only one side: buffering both doubles the allowed polygon gap.
+    pairs = gpd.sjoin(buf, utm, predicate="intersects")
     pairs = pairs[pairs["zone_left"] != pairs["zone_right"]]
     cent = utm.set_index("zone").centroid
     a = cent.loc[pairs["zone_left"]].reset_index(drop=True)
