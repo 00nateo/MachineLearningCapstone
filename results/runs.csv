@@ -1,0 +1,5 @@
+tag,trained_at,trees,n_features,objective,learning_rate,num_leaves,min_data_in_leaf,feature_fraction,bagging_fraction,lambda_l2,seed
+nyc_fold3,2026-10-28 13:13,2250,23,binary,0.05,63,200,0.8,0.8,1,42
+nyc_fold3_deployable,2026-10-28 13:52,2370,21,binary,0.05,63,200,0.8,0.8,1,42
+nyc_fold3_surge150,2026-10-28 15:29,1384,27,binary,0.05,63,200,0.8,0.8,1,42
+nyc_fold3_surge150_deployable,2026-10-28 15:34,1689,25,binary,0.05,63,200,0.8,0.8,1,42

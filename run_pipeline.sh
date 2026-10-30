@@ -4,6 +4,7 @@
 #   ACCOUNT=myalloc HF_REPO=... ./run_pipeline.sh process    # convert -> aggregate -> export -> upload
 #   ACCOUNT=myalloc ./run_pipeline.sh external               # external fetches only
 #   ACCOUNT=myalloc HF_REPO=... ./run_pipeline.sh export     # export -> upload (republish only)
+#   ACCOUNT=myalloc ./run_pipeline.sh features               # label.py + features.py from data/export
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -44,6 +45,10 @@ case "$STAGE" in
     exp=$(sub slurm/06_export.sbatch)
     up=$(sub --dependency=afterok:$exp slurm/07_upload.sbatch)
     echo "export=$exp upload=$up"
+    ;;
+  features)
+    feat=$(sub slurm/08_features.sbatch)
+    echo "features=$feat"
     ;;
   *) echo "unknown stage: $STAGE" >&2; exit 1 ;;
 esac

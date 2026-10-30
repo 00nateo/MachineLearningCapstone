@@ -33,16 +33,40 @@ STAGE = ROOT / "data" / "export.tmp"
 AIRPORT_CITY = {"ORD": "chicago", "MDW": "chicago", "JFK": "nyc", "LGA": "nyc", "EWR": "nyc"}
 ALERT_AGENCIES = ("NYCT Subway", "NYCT Bus", "LIRR", "MNR", "BT")
 UTM = {"nyc": "EPSG:32618", "chicago": "EPSG:32616"}  # metres, for area and centroids
+ADJ_TOLERANCE_M = 20  # polygons this close count as neighbours (bridges digitising gaps)
+METRO_OF_STATE = {"NY": "nyc", "NJ": "nyc", "IL": "chicago"}
+METRO_TZ = {"nyc": "America/New_York", "chicago": "America/Chicago"}
+# Typical event length in hours, for an estimated end time (ESPN gives start times only).
+EVENT_HOURS = {"nfl": 3.25, "ncaaf-fbs": 3.5, "ncaaf-fcs": 3.25, "mlb": 3.0, "nba": 2.5, "wnba": 2.0,
+               "nhl": 2.5, "mls": 2.0, "ncaam": 2.0, "ncaaw": 2.0, "us-open": 2.5, "concert": 3.5}
+CONCERT_START = "19:30"  # setlist.fm has dates only
+DROPPED_STATUS = ("STATUS_CANCELED", "STATUS_POSTPONED")
+# Out-of-zone venues whose crowds enter the city at known points (option 4). Each point is
+# mapped to the zone containing it, or the nearest zone. Matched by venue-name substring;
+# out-of-zone venues not listed here only feed the citywide event features (option 3).
+ENTRY_POINTS = {
+    "MetLife Stadium": [("Penn Station", 40.7506, -73.9935), ("Port Authority", 40.7570, -73.9903)],
+    "Prudential Center": [("Penn Station", 40.7506, -73.9935)],
+    "Red Bull Arena": [("33rd St PATH", 40.7489, -73.9881), ("World Trade Center PATH", 40.7126, -74.0111)],
+    "Sports Illustrated Stadium": [("33rd St PATH", 40.7489, -73.9881), ("World Trade Center PATH", 40.7126, -74.0111)],  # Red Bull Arena, renamed
+    "UBS Arena": [("UBS Arena", 40.7117, -73.7259)],
+    "Allstate Arena": [("O'Hare", 41.9786, -87.9048)],
+    "Ryan Field": [("Howard CTA", 42.0190, -87.6729)],
+    "Welsh-Ryan Arena": [("Howard CTA", 42.0190, -87.6729)],
+}
 
 TABLES = {  # file -> (time column for the manifest, description for the dataset card)
-    "nyc_zone_hour.parquet": ("hour", "Pickups per NYC taxi zone (1-263) per local hour, zero-filled. Source of hotspot labels and demand lags."),
-    "chicago_zone_hour.parquet": ("hour", "Pickups per Chicago community area (1-77) per local hour, zero-filled."),
+    "nyc_zone_hour.parquet": ("hour", "Per NYC taxi zone (1-263) x local hour: pickups and dropoffs (zero-filled); median request-to-pickup wait, fare+tip, driver pay and trip miles of pickups. Source of hotspot labels and demand lags."),
+    "chicago_zone_hour.parquet": ("hour", "Per Chicago community area (1-77) x local hour: pickups and dropoffs (zero-filled); median fare+tip and trip miles of pickups (no wait or driver pay published)."),
     "nyc_city_hour.parquet": ("hour", "Citywide pickups per hour, pickups with no valid zone (264/265), dst_merged_hour."),
     "chicago_city_hour.parquet": ("hour", "Citywide pickups per hour, pickups with NULL community area, dst_merged_hour."),
     "nyc_drive_times.parquet": ("year", "Median trip seconds per OD zone pair x year x hour of day x weekend. Use year y-1 for year y."),
     "chicago_drive_times.parquet": ("year", "Median trip seconds per OD community-area pair x year x hour of day x weekend."),
     "zones_nyc.parquet": (None, "GeoParquet: taxi zone polygons, borough, name, area, centroid, subway station complexes."),
     "zones_chicago.parquet": (None, "GeoParquet: community area polygons, name, area, centroid, 'L' stations."),
+    "zone_adjacency.parquet": (None, "Neighbouring zone pairs per city (polygons within 20 m), both directions, with centroid distance in km."),
+    "event_venues.parquet": (None, "Event venues (sports + concerts) with coordinates, their zone (NULL outside the zones) and, for some out-of-zone venues, the zones their crowds enter through."),
+    "events.parquet": ("start_local", "Sports games (pro, college, US Open matches) and concert nights at NYC- and Chicago-area venues, with local start, estimated end, zone and attendance."),
     "weather_asos.parquet": ("valid_utc", "ASOS observations (ORD, MDW, LGA, JFK, Central Park), routine + special METARs."),
     "nws_warnings.parquet": ("utc_issue", "NWS VTEC products from LOT (Chicago) and OKX (NYC); gtype C rows carry UGC zone codes."),
     "bts_airport_hour.parquet": ("hour", "Flights per airport x local hour: scheduled/cancelled by scheduled time, delays by actual time."),
@@ -61,6 +85,14 @@ CONVENTIONS = """\
 - 0 means an observed zero; a missing row or NULL means no data. MTA ridership starts 2020-07; zones
   without a station are absent from `mta_zone_hour` / `cta_area_day` (see the station counts in the
   zones tables). Alert and flight tables only have rows for hours with activity.
+- Zone-hour `median_*` columns describe that hour's pickups and are NULL when it had none.
+  Dropoffs are counted where and when trips ended. Like pickups, all of them are only known once
+  the hour is over, so lag them >= 1 hour.
+- Events: schedules are known in advance, so they may describe the target hour. ESPN gives start
+  times; end times are estimates (typical length per league). setlist.fm gives dates only, so
+  concerts are placed at 19:30-23:00. ESPN attendance is reported after the game. Canceled and
+  postponed games are dropped. Out-of-zone venues have `zone` NULL; some list `entry_zones`
+  where their crowds enter the city (e.g. MetLife -> Penn Station, Port Authority).
 - Splits are by time only: train 2019-2022 excluding 2020-03..2021-06, early-stop 2023,
   calibrate 2024, test 2025+.
 
@@ -150,6 +182,85 @@ def write_zones(zones, station_counts, col, city, name):
     zones.assign(area_km2=utm.area / 1e6, centroid_lat=cent.y, centroid_lon=cent.x,
                  **{col: zones["zone"].map(station_counts).fillna(0).astype("int16")}
                  ).to_parquet(STAGE / name, compression="zstd", index=False)
+
+
+def adjacency(zones, city):
+    """Neighbouring zone pairs (polygons within ADJ_TOLERANCE_M), both directions."""
+    utm = zones[["zone", "geometry"]].to_crs(UTM[city])
+    buf = utm.assign(geometry=utm.buffer(ADJ_TOLERANCE_M))
+    # Buffer only one side: buffering both doubles the allowed polygon gap.
+    pairs = gpd.sjoin(buf, utm, predicate="intersects")
+    pairs = pairs[pairs["zone_left"] != pairs["zone_right"]]
+    cent = utm.set_index("zone").centroid
+    a = cent.loc[pairs["zone_left"]].reset_index(drop=True)
+    b = cent.loc[pairs["zone_right"]].reset_index(drop=True)
+    return pd.DataFrame({"city": city, "zone": pairs["zone_left"].astype("int16").values,
+                         "neighbor": pairs["zone_right"].astype("int16").values,
+                         "centroid_km": (a.distance(b) / 1000).round(3).values})
+
+
+def zone_of_points(points, zones, city):
+    """Zone containing each (lat, lon) point, or the nearest zone when outside all of them."""
+    utm = zones[["zone", "geometry"]].to_crs(UTM[city])
+    pts = gpd.GeoDataFrame(points, crs="EPSG:4326",
+                           geometry=gpd.points_from_xy(points["lon"], points["lat"])).to_crs(UTM[city])
+    inside = gpd.sjoin(pts, utm, how="left", predicate="within").drop_duplicates("pid")
+    nearest = gpd.sjoin_nearest(pts, utm, how="left").drop_duplicates("pid")
+    return inside.set_index("pid")["zone"], nearest.set_index("pid")["zone"]
+
+
+def event_venues(zones_by_city):
+    """Every geocoded venue with its zone (inside a city's zones) or entry zones (option 4)."""
+    v = pd.read_parquet(EXT / "events" / "venues.parquet")
+    lost = v[v["lat"].isna()]
+    if len(lost):
+        print(f"events: {len(lost)} venues without coordinates, dropped: {lost['venue_name'].tolist()}", flush=True)
+    v = v.dropna(subset=["lat"]).assign(metro=lambda d: d["state"].map(METRO_OF_STATE)).reset_index(drop=True)
+    v["pid"] = v.index
+    v["zone"], v["entry_zones"] = pd.NA, None
+    for city, zones in zones_by_city.items():
+        mine = v[v["metro"] == city]
+        inside, _ = zone_of_points(mine[["pid", "lat", "lon"]], zones, city)
+        v.loc[mine.index, "zone"] = inside.reindex(mine["pid"]).values
+        for i in mine.index[v.loc[mine.index, "zone"].isna()]:
+            key = next((k for k in ENTRY_POINTS if k.lower() in v.at[i, "venue_name"].lower()), None)
+            if key is None:
+                continue
+            pts = pd.DataFrame([(n, la, lo) for n, (_, la, lo) in enumerate(ENTRY_POINTS[key])], columns=["pid", "lat", "lon"])
+            ins, near = zone_of_points(pts, zones, city)
+            v.at[i, "entry_zones"] = sorted({int(z) for z in ins.fillna(near).values})
+    v["zone"] = v["zone"].astype("Int16")
+    print(f"events: {v['zone'].notna().sum()} venues inside zones, {v['entry_zones'].notna().sum()} linked by entry "
+          f"zones, {(v['zone'].isna() & v['entry_zones'].isna()).sum()} citywide only", flush=True)
+    return v.drop(columns="pid")
+
+
+def events_table(venues):
+    """One row per game / US Open match / concert night, with local times and venue zone."""
+    ev = EXT / "events"
+    s = pd.read_parquet(ev / "sports.parquet")
+    s = s[~s["status"].isin(DROPPED_STATUS)].assign(source="espn", title=lambda d: d["away"] + " at " + d["home"])
+    s["title"] = s["title"].fillna(s["detail"])
+    c = pd.read_parquet(ev / "concerts.parquet").merge(
+        pd.read_parquet(ev / "concert_venues.parquet").rename(columns={"name": "venue_name"}),
+        on=["venue_key", "setlistfm_id"])
+    c = (c.groupby(["setlistfm_id", "venue_name", "city", "state", "date"], as_index=False)
+          .agg(title=("artist", lambda a: ", ".join(sorted(set(a.dropna())))), n_acts=("artist", "nunique")))
+    c = c.assign(source="setlistfm", league="concert", attendance=None,
+                 event_id=lambda d: d["setlistfm_id"] + "-" + d["date"].astype(str),
+                 start_local=lambda d: pd.to_datetime(d["date"].astype(str) + " " + CONCERT_START))
+    s = s.assign(metro=s["state"].map(METRO_OF_STATE))
+    s["start_local"] = [pd.Timestamp(t).tz_localize("UTC").tz_convert(METRO_TZ[m]).tz_localize(None)
+                        for t, m in zip(s["start_utc"], s["metro"])]
+    c["metro"] = c["state"].map(METRO_OF_STATE)
+    cols = ["metro", "source", "league", "event_id", "venue_name", "city", "state", "start_local", "attendance", "title"]
+    out = pd.concat([s[cols], c[cols]], ignore_index=True)
+    out = out.merge(venues[["venue_name", "city", "state", "zone"]], on=["venue_name", "city", "state"], how="left")
+    out["end_local_est"] = out["start_local"] + pd.to_timedelta(out["league"].map(EVENT_HOURS), unit="h")
+    out["attendance"] = pd.to_numeric(out["attendance"], errors="coerce")
+    out["event_id"] = out["event_id"].astype(str)
+    print("events by metro and source:\n" + out.groupby(["metro", "source"]).size().to_string(), flush=True)
+    return out.sort_values("start_local")
 
 
 def mta_zone_hour(con, zones):
@@ -292,6 +403,11 @@ def main():
     nyc, chicago = nyc_zones(), chicago_zones()
     write_zones(nyc, mta_zone_hour(con, nyc), "n_subway_complexes", "nyc", "zones_nyc.parquet")
     write_zones(chicago, cta_area_day(con, chicago), "n_l_stations", "chicago", "zones_chicago.parquet")
+    pd.concat([adjacency(nyc, "nyc"), adjacency(chicago, "chicago")]).to_parquet(
+        STAGE / "zone_adjacency.parquet", compression="zstd", index=False)
+    venues = event_venues({"nyc": nyc, "chicago": chicago})
+    venues.to_parquet(STAGE / "event_venues.parquet", compression="zstd", index=False)
+    events_table(venues).to_parquet(STAGE / "events.parquet", compression="zstd", index=False)
     bts_airport_hour(con)
     mta_alerts_hour(con)
 
