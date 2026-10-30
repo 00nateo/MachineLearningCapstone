@@ -1,0 +1,8 @@
+condition,f1,precision,recall,auc_pr
+normal,0.837,0.834,0.84,0.927
+extreme (any),0.848,0.843,0.852,0.936
+severe weather,0.827,0.824,0.831,0.917
+NWS warning,0.841,0.84,0.843,0.926
+transit disruption,0.846,0.844,0.849,0.936
+major event,0.799,0.763,0.838,0.903
+flight delays,0.99,0.995,0.985,0.999

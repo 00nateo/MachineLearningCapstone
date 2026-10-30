@@ -4,6 +4,8 @@
 #
 # The portal only serves CSV (no parquet), and large/sorted queries time out, so each day is
 # fetched in 6-hour chunks and each chunk is verified against the server's row count.
+# The pickup/dropoff_centroid_location columns (WKT copies of the lat/lon columns, ~23% of the
+# bytes) are not requested; every other column is, read from each year's dataset header.
 # Output: Chicago-Ride-Data/<year>/tnp_trips_<YYYY-MM-DD>.csv (one file per day)
 #
 # Usage: ./download_chicago_data.sh [start_year] [end_year]
@@ -49,9 +51,23 @@ soda() {
   curl "${args[@]}"
 }
 
-# download_day <dataset> <YYYY-MM-DD>
+# select_for <dataset> : comma-separated columns to request ("*" if the header can't be read).
+select_for() {
+  local dataset=$1 header="" attempt
+  for attempt in 1 2 3 4 5; do
+    header=$(soda "$dataset" "\$limit=1" | head -1 | tr -d '"\r')
+    [[ "$header" == *trip_start_timestamp* ]] && break
+    sleep $((attempt * 10))
+  done
+  if [[ "$header" != *trip_start_timestamp* ]]; then
+    echo "  $dataset: could not read columns, requesting all" >&2; echo "*"; return
+  fi
+  tr ',' '\n' <<<"$header" | grep -vx -e pickup_centroid_location -e dropoff_centroid_location | paste -sd,
+}
+
+# download_day <dataset> <YYYY-MM-DD> <select>
 download_day() {
-  local dataset=$1 day=$2
+  local dataset=$1 day=$2 cols=$3
   local dest="$OUT_DIR/${day:0:4}/tnp_trips_$day.csv"
   [[ -f "$dest" ]] && return 0
 
@@ -76,7 +92,7 @@ download_day() {
 
     local ok=0
     for attempt in 1 2 3 4 5; do
-      if soda "$dataset" "\$where=$where" "\$limit=10000000" > "$tmp_dir/$i.csv"; then
+      if soda "$dataset" "\$select=$cols" "\$where=$where" "\$limit=10000000" > "$tmp_dir/$i.csv"; then
         local got=$(( $(wc -l < "$tmp_dir/$i.csv") - 1 ))
         [[ $got -eq $expected ]] && { ok=1; break; }
         echo "  $day chunk $i: got $got/$expected rows, retrying ($attempt)" >&2
@@ -107,13 +123,14 @@ for year in $(seq "$START_YEAR" "$END_YEAR"); do
     echo "No dataset id known for $year - add it to dataset_for_year()" >&2
     continue
   fi
+  cols=$(select_for "$dataset")
   for month in $(seq -w 1 12); do
     for d in $(seq -w 1 "$(days_in_month "$year" "$month")"); do
       day="$year-$month-$d"
-      [[ "$day" < "$today" ]] && echo "$dataset $day"
+      if [[ "$day" < "$today" ]]; then echo "$dataset $day $cols"; fi
     done
   done
-done | xargs -P "$JOBS" -n 2 bash -c 'download_day "$0" "$1"'
+done | xargs -P "$JOBS" -n 3 bash -c 'download_day "$0" "$1" "$2"'
 
 failed=$?
 echo
